@@ -15,10 +15,24 @@ const (
 	StatusDoing   Status = "doing"
 	StatusBlocked Status = "blocked"
 	StatusDone    Status = "done"
+
+	// Development preset columns. Both presets share the first (todo)
+	// and blocked columns; only the middle and terminal columns differ.
+	StatusInDev         Status = "indev"
+	StatusTestingReview Status = "testing-review"
+	StatusShipped       Status = "shipped"
 )
 
-// Statuses lists the columns in left-to-right board order.
+// Statuses lists the personal columns in left-to-right board order. It is
+// the default for boards whose file predates per-board columns.
 var Statuses = []Status{StatusTodo, StatusDoing, StatusBlocked, StatusDone}
+
+// PersonalColumns is the default preset: a short personal board.
+var PersonalColumns = Statuses
+
+// DevColumns is the development preset: review and testing share one
+// TESTING/REVIEW stage, whose terminal column is shipped instead of done.
+var DevColumns = []Status{StatusTodo, StatusInDev, StatusTestingReview, StatusBlocked, StatusShipped}
 
 // Label is the human-readable column heading.
 func (s Status) Label() string {
@@ -31,18 +45,14 @@ func (s Status) Label() string {
 		return "BLOCKED"
 	case StatusDone:
 		return "DONE"
+	case StatusInDev:
+		return "IN DEV"
+	case StatusTestingReview:
+		return "TESTING/REVIEW"
+	case StatusShipped:
+		return "SHIPPED"
 	}
 	return string(s)
-}
-
-// Index is the column position, 0-based. Unknown statuses report 0.
-func (s Status) Index() int {
-	for i, c := range Statuses {
-		if c == s {
-			return i
-		}
-	}
-	return 0
 }
 
 // Transition records one status change, so analytics can reconstruct history.
@@ -92,14 +102,15 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// CompletedAt reports when the task last entered done. ok is false unless the
-// task is currently done, so reopened tasks are not counted as completions.
-func CompletedAt(t Task) (time.Time, bool) {
-	if t.Status != StatusDone {
+// CompletedAt reports when the task last entered the board's terminal
+// column (done/shipped). ok is false unless the task is currently there,
+// so reopened tasks are not counted as completions.
+func CompletedAt(t Task, done Status) (time.Time, bool) {
+	if t.Status != done {
 		return time.Time{}, false
 	}
 	for i := len(t.History) - 1; i >= 0; i-- {
-		if t.History[i].To == StatusDone {
+		if t.History[i].To == done {
 			return t.History[i].At, true
 		}
 	}

@@ -36,15 +36,16 @@ func TestNewTaskIDsAreUnique(t *testing.T) {
 	}
 }
 
-func TestStatusIndex(t *testing.T) {
-	cases := map[Status]int{StatusTodo: 0, StatusDoing: 1, StatusBlocked: 2, StatusDone: 3}
+func TestBoardColumnIndex(t *testing.T) {
+	b := &Board{Columns: DevColumns}
+	cases := map[Status]int{StatusTodo: 0, StatusInDev: 1, StatusTestingReview: 2, StatusBlocked: 3, StatusShipped: 4}
 	for s, want := range cases {
-		if got := s.Index(); got != want {
-			t.Errorf("%q.Index() = %d, want %d", s, got, want)
+		if got := b.ColumnIndex(s); got != want {
+			t.Errorf("ColumnIndex(%q) = %d, want %d", s, got, want)
 		}
 	}
-	if got := Status("nope").Index(); got != 0 {
-		t.Errorf("unknown status index = %d, want 0", got)
+	if got := b.ColumnIndex(StatusDone); got != -1 {
+		t.Errorf("ColumnIndex(done) on a dev board = %d, want -1", got)
 	}
 }
 
@@ -59,7 +60,7 @@ func TestCompletedAtReturnsLastDoneTransition(t *testing.T) {
 			{From: StatusDoing, To: StatusDone, At: last},
 		},
 	}
-	got, ok := CompletedAt(tk)
+	got, ok := CompletedAt(tk, StatusDone)
 	if !ok {
 		t.Fatal("CompletedAt returned ok=false, want true")
 	}
@@ -70,7 +71,7 @@ func TestCompletedAtReturnsLastDoneTransition(t *testing.T) {
 
 func TestCompletedAtNotDone(t *testing.T) {
 	tk := Task{Status: StatusDoing, History: []Transition{{From: StatusTodo, To: StatusDoing, At: ref}}}
-	if _, ok := CompletedAt(tk); ok {
+	if _, ok := CompletedAt(tk, StatusDone); ok {
 		t.Error("CompletedAt returned ok=true for a non-done task")
 	}
 }

@@ -44,8 +44,8 @@ const (
 type BoardModel struct {
 	board *task.Board
 
-	col   int    // focused column, index into task.Statuses
-	sel   [4]int // selected item per column
+	col   int   // focused column, index into the board's columns
+	sel   []int // selected item per column, same length as the board's columns
 	focus focusMode
 	mode  boardMode
 
@@ -70,6 +70,7 @@ type BoardModel struct {
 // NewBoardModel wires a board into a fresh page model.
 func NewBoardModel(b *task.Board) BoardModel {
 	m := BoardModel{board: b, focus: focusItem, mode: modeNormal, now: time.Now}
+	m.sel = make([]int, len(b.Statuses()))
 
 	line := func(placeholder string, limit int) textinput.Model {
 		in := textinput.New()
@@ -188,7 +189,7 @@ func (m BoardModel) overlay(panel string) string {
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, panel)
 }
 
-func (m BoardModel) currentStatus() task.Status { return task.Statuses[m.col] }
+func (m BoardModel) currentStatus() task.Status { return m.board.Statuses()[m.col] }
 
 // selectedTask is the card under the cursor, if the column is not empty.
 func (m BoardModel) selectedTask() (task.Task, bool) {
@@ -202,7 +203,7 @@ func (m BoardModel) selectedTask() (task.Task, bool) {
 
 // clampSelection keeps every column's cursor inside its item range.
 func (m *BoardModel) clampSelection() {
-	for i, s := range task.Statuses {
+	for i, s := range m.board.Statuses() {
 		n := len(m.board.ByStatus(s))
 		if m.sel[i] >= n {
 			m.sel[i] = n - 1
@@ -225,24 +226,24 @@ const (
 	columnChrome = 2
 )
 
-// columnWidth splits the terminal evenly across the four columns, leaving
+// columnWidth splits the terminal evenly across the board's columns, leaving
 // room for each column's border and padding.
 func (m BoardModel) columnWidth() int {
 	w := m.width
 	if w <= 0 {
 		w = 80
 	}
-	per := w/len(task.Statuses) - columnChrome
+	per := w/len(m.board.Statuses()) - columnChrome
 	if per < minColumnWidth {
 		per = minColumnWidth
 	}
 	return per
 }
 
-// minBoardWidth is the narrowest terminal that can show all four columns at
+// minBoardWidth is the narrowest terminal that can show every column at
 // minColumnWidth without wrapping. View falls back to a warning below this.
 func (m BoardModel) minBoardWidth() int {
-	return len(task.Statuses) * (minColumnWidth + columnChrome)
+	return len(m.board.Statuses()) * (minColumnWidth + columnChrome)
 }
 
 // minColumnBlockHeight is the least columnHeight() will ever return: header,
@@ -266,7 +267,7 @@ func (m BoardModel) columnHeight() int {
 	return h
 }
 
-// View renders the four columns side by side plus the footer line, or a
+// View renders the board's columns side by side plus the footer line, or a
 // centred popup when a task is expanded or the form is open. Below
 // minBoardWidth the columns would overflow and wrap into a scrambled mess,
 // so it renders a short warning instead — the popups are exempt, they size
@@ -286,15 +287,15 @@ func (m BoardModel) View() string {
 	}
 	if need := m.minBoardWidth(); m.width > 0 && m.width < need {
 		return MutedStyle.Render(fmt.Sprintf(
-			"terminal too narrow\n\ngotodo needs at least %d columns for the four-column board.\nThis terminal is %d. Widen it, or press tab for Analytics or Archive.",
-			need, m.width))
+			"terminal too narrow\n\ngotodo needs at least %d columns for the %d-column board.\nThis terminal is %d. Widen it, or press tab for Analytics or Archive.",
+			need, len(m.board.Statuses()), m.width))
 	}
 	footer := m.renderFooter()
 	m.footerRows = lipgloss.Height(footer)
 
 	cw := m.columnWidth()
-	cols := make([]string, 0, len(task.Statuses))
-	for i, s := range task.Statuses {
+	cols := make([]string, 0, len(m.board.Statuses()))
+	for i, s := range m.board.Statuses() {
 		cols = append(cols, m.renderColumn(i, s, cw))
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
@@ -434,7 +435,7 @@ func (m BoardModel) renderCard(colIdx, itemIdx int, t task.Task, width int) stri
 	if t.Description != "" {
 		lines = append(lines, descLine(t.Description, inner))
 	}
-	if dl := RenderDeadline(t, m.now()); dl != "" {
+	if dl := RenderDeadline(t, m.now(), m.board.DoneStatus()); dl != "" {
 		lines = append(lines, dl)
 	}
 	body := strings.Join(lines, "\n")
@@ -507,7 +508,7 @@ func (m BoardModel) renderDetail() string {
 	foot := []string{"", MutedStyle.Render("e edit · d delete · esc close")}
 
 	var when []string
-	if dl := RenderDeadline(t, m.now()); dl != "" {
+	if dl := RenderDeadline(t, m.now(), m.board.DoneStatus()); dl != "" {
 		when = []string{"", dl}
 		// The deadline's own month, the day bracketed and today green, so
 		// "how far off is this" reads at a glance instead of from date
@@ -664,7 +665,7 @@ func (m BoardModel) renderFooter() string {
 		focusLabel = "column"
 	}
 	return HelpStyle.Render(
-		"focus: " + focusLabel + " (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab analytics · ? help · q quit")
+		"focus: " + focusLabel + " (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab switch · ? help · q quit")
 }
 
 // truncate shortens s to fit n display columns, appending an ellipsis when
@@ -814,7 +815,7 @@ func (m BoardModel) updateInput(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 		} else {
 			m.board.Add(title, desc, deadline, m.now())
 			m.col = 0
-			m.sel[0] = len(m.board.ByStatus(task.StatusTodo)) - 1
+			m.sel[0] = len(m.board.ByStatus(m.board.Statuses()[0])) - 1
 		}
 		m.closeForm()
 		m.clampSelection()
@@ -927,7 +928,7 @@ func (m BoardModel) updateMove(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 		if err := m.board.Move(m.grabID, m.grabFrom, m.now()); err != nil {
 			m.err = err.Error()
 		}
-		m.col = m.grabFrom.Index()
+		m.col = m.board.ColumnIndex(m.grabFrom)
 		m.mode = modeNormal
 		m.grabID = ""
 		m.clampSelection()
@@ -941,15 +942,15 @@ func (m BoardModel) updateMove(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 // of the board, or on a Move error) doesn't trigger a spurious dirty save.
 func (m *BoardModel) shiftGrabbed(delta int) bool {
 	next := m.col + delta
-	if next < 0 || next >= len(task.Statuses) {
+	if next < 0 || next >= len(m.board.Statuses()) {
 		return false
 	}
-	if err := m.board.Move(m.grabID, task.Statuses[next], m.now()); err != nil {
+	if err := m.board.Move(m.grabID, m.board.Statuses()[next], m.now()); err != nil {
 		m.err = err.Error()
 		return false
 	}
 	m.col = next
-	items := m.board.ByStatus(task.Statuses[next])
+	items := m.board.ByStatus(m.board.Statuses()[next])
 	for i, t := range items {
 		if t.ID == m.grabID {
 			m.sel[next] = i
@@ -983,8 +984,8 @@ func (m *BoardModel) moveColumn(delta int) {
 	if next < 0 {
 		next = 0
 	}
-	if next >= len(task.Statuses) {
-		next = len(task.Statuses) - 1
+	if next >= len(m.board.Statuses()) {
+		next = len(m.board.Statuses()) - 1
 	}
 	m.col = next
 }

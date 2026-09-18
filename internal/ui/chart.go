@@ -45,7 +45,8 @@ func heatLevel(v, max int) int {
 	return l
 }
 
-// HBar renders "label ████░░░░ 5" scaled to max across width cells.
+// HBar renders "label ████░░░░ 5" scaled to max across width cells. The
+// label field fits the longest column name ("testing-review").
 func HBar(label string, value, max, width int) string {
 	filled := 0
 	if max > 0 && value > 0 {
@@ -58,5 +59,5 @@ func HBar(label string, value, max, width int) string {
 		filled = width
 	}
 	bar := strings.Repeat("█", filled) + MutedStyle.Render(strings.Repeat("░", width-filled))
-	return fmt.Sprintf("%-8s %s %d", label, bar, value)
+	return fmt.Sprintf("%-14s %s %d", label, bar, value)
 }

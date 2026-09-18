@@ -24,9 +24,9 @@ func startOfDay(t time.Time) time.Time {
 
 // Counts returns the number of tasks per column, with every column present
 // (zeroes included) so callers can render a stable row of tiles.
-func Counts(tasks []task.Task) map[task.Status]int {
-	out := make(map[task.Status]int, len(task.Statuses))
-	for _, s := range task.Statuses {
+func Counts(tasks []task.Task, columns []task.Status) map[task.Status]int {
+	out := make(map[task.Status]int, len(columns))
+	for _, s := range columns {
 		out[s] = 0
 	}
 	for _, t := range tasks {
@@ -37,12 +37,13 @@ func Counts(tasks []task.Task) map[task.Status]int {
 	return out
 }
 
-// CompletionsByDay buckets every completed task by the day it was completed,
-// as midnight in loc. Days with no completions are absent rather than zero.
-func CompletionsByDay(tasks []task.Task, loc *time.Location) map[time.Time]int {
+// CompletionsByDay buckets every completed task by the day it reached the
+// board's terminal column, as midnight in loc. Days with no completions are
+// absent rather than zero.
+func CompletionsByDay(tasks []task.Task, loc *time.Location, done task.Status) map[time.Time]int {
 	out := map[time.Time]int{}
 	for _, t := range tasks {
-		at, ok := task.CompletedAt(t)
+		at, ok := task.CompletedAt(t, done)
 		if !ok {
 			continue
 		}
@@ -81,11 +82,11 @@ func ByDeadline(tasks []task.Task) []task.Task {
 
 // Throughput returns completions per day for the last `days` days, oldest
 // first, ending on now's day. Empty days are present with N == 0.
-func Throughput(tasks []task.Task, days int, now time.Time) []DayCount {
+func Throughput(tasks []task.Task, days int, now time.Time, done task.Status) []DayCount {
 	if days < 1 {
 		return nil
 	}
-	byDay := CompletionsByDay(tasks, now.Location())
+	byDay := CompletionsByDay(tasks, now.Location(), done)
 	today := startOfDay(now)
 	out := make([]DayCount, 0, days)
 	for i := days - 1; i >= 0; i-- {
@@ -98,8 +99,8 @@ func Throughput(tasks []task.Task, days int, now time.Time) []DayCount {
 // Streak reports the current and longest run of consecutive days with at
 // least one completion. The current streak may end on yesterday, since today
 // is not over yet.
-func Streak(tasks []task.Task, now time.Time) (current, longest int) {
-	byDay := CompletionsByDay(tasks, now.Location())
+func Streak(tasks []task.Task, now time.Time, done task.Status) (current, longest int) {
+	byDay := CompletionsByDay(tasks, now.Location(), done)
 	if len(byDay) == 0 {
 		return 0, 0
 	}
@@ -136,8 +137,9 @@ func Streak(tasks []task.Task, now time.Time) (current, longest int) {
 }
 
 // TimeInStatus reconstructs how long a task has spent in each column by
-// replaying its transition history. Done tasks stop accruing time.
-func TimeInStatus(t task.Task, now time.Time) map[task.Status]time.Duration {
+// replaying its transition history. Tasks in the terminal column stop
+// accruing time.
+func TimeInStatus(t task.Task, now time.Time, done task.Status) map[task.Status]time.Duration {
 	out := map[task.Status]time.Duration{}
 	var cur task.Status
 	if len(t.History) > 0 {
@@ -150,7 +152,7 @@ func TimeInStatus(t task.Task, now time.Time) map[task.Status]time.Duration {
 		out[cur] += tr.At.Sub(start)
 		cur, start = tr.To, tr.At
 	}
-	if cur != task.StatusDone {
+	if cur != done {
 		out[cur] += now.Sub(start)
 	}
 	return out
@@ -164,19 +166,20 @@ type CycleStats struct {
 	PerColumn map[task.Status]time.Duration // mean time per column, completed tasks only
 }
 
-// CycleTimes measures created-to-done duration over completed tasks only.
-func CycleTimes(tasks []task.Task, now time.Time) CycleStats {
+// CycleTimes measures created-to-terminal-column duration over completed
+// tasks only.
+func CycleTimes(tasks []task.Task, now time.Time, done task.Status) CycleStats {
 	out := CycleStats{PerColumn: map[task.Status]time.Duration{}}
 	var durations []time.Duration
 	totals := map[task.Status]time.Duration{}
 
 	for _, t := range tasks {
-		at, ok := task.CompletedAt(t)
+		at, ok := task.CompletedAt(t, done)
 		if !ok {
 			continue
 		}
 		durations = append(durations, at.Sub(t.CreatedAt))
-		for s, d := range TimeInStatus(t, now) {
+		for s, d := range TimeInStatus(t, now, done) {
 			totals[s] += d
 		}
 	}

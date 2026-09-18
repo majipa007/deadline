@@ -23,14 +23,16 @@ var (
 	colDone    = lipgloss.AdaptiveColor{Light: "#2f7a4f", Dark: "#9ece6a"}
 )
 
-// AccentFor is the signature colour of a column.
+// AccentFor is the signature colour of a column. Dev-pipeline columns reuse
+// the personal palette by role: in-progress work is amber like doing, the
+// terminal column is green like done.
 func AccentFor(s task.Status) lipgloss.AdaptiveColor {
 	switch s {
-	case task.StatusDoing:
+	case task.StatusDoing, task.StatusInDev, task.StatusTestingReview:
 		return colDoing
 	case task.StatusBlocked:
 		return colBlocked
-	case task.StatusDone:
+	case task.StatusDone, task.StatusShipped:
 		return colDone
 	}
 	return colTodo
@@ -130,11 +132,11 @@ func UrgencyColor(u task.Urgency) lipgloss.AdaptiveColor {
 // RenderDeadline is the card's deadline line: a coloured bullet, the date in
 // DD/MM/YYYY, and a ✗ when the deadline has passed. Empty when the task has
 // no deadline.
-func RenderDeadline(t task.Task, now time.Time) string {
+func RenderDeadline(t task.Task, now time.Time, done task.Status) string {
 	if t.Deadline == nil {
 		return ""
 	}
-	u := task.DeadlineUrgency(t, now)
+	u := task.DeadlineUrgency(t, now, done)
 	// Format in now's zone, the same zone DeadlineUrgency re-anchors the
 	// deadline to before taking its calendar day. Formatting the raw
 	// stored zone instead can render a date that disagrees with the

@@ -51,14 +51,15 @@ func DaysUntilDeadline(t Task, now time.Time) (int, bool) {
 	return daysBetween(from, to), true
 }
 
-// DeadlineUrgency buckets a task's deadline for display. A completed task
-// always reports UrgencyDone: finishing late is not an ongoing emergency.
-func DeadlineUrgency(t Task, now time.Time) Urgency {
+// DeadlineUrgency buckets a task's deadline for display. A task in the
+// board's terminal column always reports UrgencyDone: finishing late is not
+// an ongoing emergency.
+func DeadlineUrgency(t Task, now time.Time, done Status) Urgency {
 	days, ok := DaysUntilDeadline(t, now)
 	if !ok {
 		return UrgencyNone
 	}
-	if t.Status == StatusDone {
+	if t.Status == done {
 		return UrgencyDone
 	}
 	switch {

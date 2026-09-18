@@ -26,7 +26,7 @@ func TestCounts(t *testing.T) {
 		{Status: task.StatusTodo}, {Status: task.StatusTodo},
 		{Status: task.StatusBlocked},
 	}
-	got := Counts(tasks)
+	got := Counts(tasks, task.Statuses)
 	if got[task.StatusTodo] != 2 {
 		t.Errorf("todo = %d, want 2", got[task.StatusTodo])
 	}
@@ -47,7 +47,7 @@ func TestThroughputZeroFillsAndOrders(t *testing.T) {
 		done("b", ref.Add(-72*time.Hour), ref),                    // today
 		done("c", ref.Add(-72*time.Hour), ref.Add(-48*time.Hour)), // two days ago
 	}
-	got := Throughput(tasks, 3, ref)
+	got := Throughput(tasks, 3, ref, task.StatusDone)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
 	}
@@ -64,7 +64,7 @@ func TestThroughputZeroFillsAndOrders(t *testing.T) {
 
 func TestThroughputIgnoresUnfinished(t *testing.T) {
 	tasks := []task.Task{{Status: task.StatusDoing, CreatedAt: ref, UpdatedAt: ref}}
-	got := Throughput(tasks, 2, ref)
+	got := Throughput(tasks, 2, ref, task.StatusDone)
 	for _, d := range got {
 		if d.N != 0 {
 			t.Errorf("day %v N = %d, want 0", d.Day, d.N)
@@ -82,7 +82,7 @@ func TestStreakCurrentAndLongest(t *testing.T) {
 		done("d", day(10), day(5)),
 		done("e", day(10), day(6)),
 	}
-	current, longest := Streak(tasks, ref)
+	current, longest := Streak(tasks, ref, task.StatusDone)
 	if current != 3 {
 		t.Errorf("current = %d, want 3", current)
 	}
@@ -94,14 +94,14 @@ func TestStreakCurrentAndLongest(t *testing.T) {
 func TestStreakCountsYesterdayWhenTodayEmpty(t *testing.T) {
 	day := func(offset int) time.Time { return ref.AddDate(0, 0, -offset) }
 	tasks := []task.Task{done("a", day(5), day(1)), done("b", day(5), day(2))}
-	current, _ := Streak(tasks, ref)
+	current, _ := Streak(tasks, ref, task.StatusDone)
 	if current != 2 {
 		t.Errorf("current = %d, want 2 (today is not over yet)", current)
 	}
 }
 
 func TestStreakEmpty(t *testing.T) {
-	current, longest := Streak(nil, ref)
+	current, longest := Streak(nil, ref, task.StatusDone)
 	if current != 0 || longest != 0 {
 		t.Errorf("Streak(nil) = (%d, %d), want (0, 0)", current, longest)
 	}
@@ -118,7 +118,7 @@ func TestTimeInStatusWalksHistory(t *testing.T) {
 			{From: task.StatusBlocked, To: task.StatusDoing, At: created.Add(7 * time.Hour)},
 		},
 	}
-	got := TimeInStatus(tk, ref)
+	got := TimeInStatus(tk, ref, task.StatusDone)
 	want := map[task.Status]time.Duration{
 		task.StatusTodo:    2 * time.Hour,
 		task.StatusDoing:   1*time.Hour + 3*time.Hour, // 1h before block, 3h after, still open
@@ -138,7 +138,7 @@ func TestTimeInStatusStopsAccruingWhenDone(t *testing.T) {
 		CreatedAt: created,
 		History:   []task.Transition{{From: task.StatusTodo, To: task.StatusDone, At: created.Add(4 * time.Hour)}},
 	}
-	got := TimeInStatus(tk, ref)
+	got := TimeInStatus(tk, ref, task.StatusDone)
 	if got[task.StatusTodo] != 4*time.Hour {
 		t.Errorf("todo = %v, want 4h", got[task.StatusTodo])
 	}
@@ -154,7 +154,7 @@ func TestCycleTimesMeanAndMedian(t *testing.T) {
 		done("c", ref.Add(-9*time.Hour), ref),
 		{Status: task.StatusDoing, CreatedAt: ref.Add(-100 * time.Hour)}, // ignored
 	}
-	got := CycleTimes(tasks, ref)
+	got := CycleTimes(tasks, ref, task.StatusDone)
 	if got.N != 3 {
 		t.Fatalf("N = %d, want 3", got.N)
 	}
@@ -167,7 +167,7 @@ func TestCycleTimesMeanAndMedian(t *testing.T) {
 }
 
 func TestCycleTimesEmpty(t *testing.T) {
-	got := CycleTimes(nil, ref)
+	got := CycleTimes(nil, ref, task.StatusDone)
 	if got.N != 0 || got.Mean != 0 || got.Median != 0 {
 		t.Errorf("CycleTimes(nil) = %+v, want zeroes", got)
 	}
@@ -215,7 +215,7 @@ func TestCompletionsByDayBucketsByCalendarDay(t *testing.T) {
 		done("c", ref, day.AddDate(0, 0, -1)),
 		{Status: task.StatusTodo, CreatedAt: ref}, // never completed
 	}
-	got := CompletionsByDay(tasks, time.UTC)
+	got := CompletionsByDay(tasks, time.UTC, task.StatusDone)
 
 	if got[day] != 2 {
 		t.Errorf("28/07 = %d, want 2", got[day])

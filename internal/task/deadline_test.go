@@ -74,14 +74,14 @@ func TestDeadlineUrgencyBuckets(t *testing.T) {
 		{"yesterday is overdue", ref.AddDate(0, 0, -1), UrgencyOverdue},
 	}
 	for _, c := range cases {
-		if got := DeadlineUrgency(due(c.day), ref); got != c.want {
+		if got := DeadlineUrgency(due(c.day), ref, StatusDone); got != c.want {
 			t.Errorf("%s: urgency = %v, want %v", c.name, got, c.want)
 		}
 	}
 }
 
 func TestDeadlineUrgencyNoDeadline(t *testing.T) {
-	if got := DeadlineUrgency(Task{Status: StatusTodo}, ref); got != UrgencyNone {
+	if got := DeadlineUrgency(Task{Status: StatusTodo}, ref, StatusDone); got != UrgencyNone {
 		t.Errorf("urgency = %v, want UrgencyNone", got)
 	}
 }
@@ -89,14 +89,14 @@ func TestDeadlineUrgencyNoDeadline(t *testing.T) {
 func TestDeadlineUrgencyDoneTaskIsNeverUrgent(t *testing.T) {
 	overdue := due(ref.AddDate(0, 0, -30))
 	overdue.Status = StatusDone
-	if got := DeadlineUrgency(overdue, ref); got != UrgencyDone {
+	if got := DeadlineUrgency(overdue, ref, StatusDone); got != UrgencyDone {
 		t.Errorf("urgency = %v, want UrgencyDone for a completed task", got)
 	}
 }
 
 func TestDeadlineUrgencyDoneWithoutDeadlineIsNone(t *testing.T) {
 	done := Task{Status: StatusDone, CreatedAt: ref}
-	if got := DeadlineUrgency(done, ref); got != UrgencyNone {
+	if got := DeadlineUrgency(done, ref, StatusDone); got != UrgencyNone {
 		t.Errorf("urgency = %v, want UrgencyNone", got)
 	}
 }

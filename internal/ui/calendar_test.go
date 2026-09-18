@@ -93,7 +93,7 @@ func TestCalendarColoursDaysByUrgency(t *testing.T) {
 	for _, c := range cases {
 		b := calBoard(c.days)
 		day := task.StartOfDay(ref.AddDate(0, 0, c.days))
-		cell := deadlineCell(map[time.Time][]task.Task{day: b.Tasks}, ref)
+		cell := deadlineCell(map[time.Time][]task.Task{day: b.Tasks}, ref, task.StatusDone)
 
 		_, style := cell(day)
 		if got, want := style.GetForeground(), UrgencyColor(c.want); got != want {
@@ -110,7 +110,7 @@ func TestCalendarDayTakesItsMostUrgentDeadline(t *testing.T) {
 		{Title: "[Later]", Status: task.StatusTodo, Deadline: &soon},
 		{Title: "[Today]", Status: task.StatusTodo, Deadline: &day},
 	}
-	if got := worstUrgency(tasks, ref); got != task.UrgencyUrgent {
+	if got := worstUrgency(tasks, ref, task.StatusDone); got != task.UrgencyUrgent {
 		t.Errorf("worstUrgency = %v, want UrgencyUrgent (the nearer deadline wins)", got)
 	}
 }

@@ -12,8 +12,8 @@ import (
 	"gotodo/internal/task"
 )
 
-// ArchiveModel is the third page: done tasks that have aged off the board.
-// It is view-only — nothing here mutates the board.
+// ArchiveModel is the third page: finished tasks that have aged off the
+// board. It is view-only — nothing here mutates the board.
 type ArchiveModel struct {
 	board *task.Board
 	now   func() time.Time
@@ -86,7 +86,7 @@ func (m ArchiveModel) View() string {
 			MutedStyle.Render("nothing archived yet"),
 			"",
 			MutedStyle.Render(truncate(fmt.Sprintf(
-				"done tasks move here %d days after you finish them",
+				"finished tasks move here %d days after you complete them",
 				int(task.ArchiveAfter.Hours()/24)), width)),
 		}
 		return strings.Join(lines, "\n")
@@ -113,7 +113,7 @@ func (m ArchiveModel) View() string {
 		lines = append(lines, MutedStyle.Render(fmt.Sprintf("+%d more", more)))
 	}
 	lines = append(lines, "",
-		MutedStyle.Render(truncate("j/k move · tab back to the board · read-only", width)))
+		MutedStyle.Render(truncate("j/k move · tab switch · read-only", width)))
 	return strings.Join(lines, "\n")
 }
 
@@ -152,7 +152,7 @@ func archivedOn(t task.Task) time.Time {
 // the two) and, if even the deadline alone does not fit, truncates that.
 func (m ArchiveModel) metaLine(t task.Task, inner int) string {
 	archivedText := "archived " + FormatDate(archivedOn(t))
-	dl := RenderDeadline(t, m.now())
+	dl := RenderDeadline(t, m.now(), m.board.DoneStatus())
 	if dl == "" {
 		return MutedStyle.Render(truncate(archivedText, inner))
 	}
@@ -167,7 +167,7 @@ func (m ArchiveModel) metaLine(t task.Task, inner int) string {
 
 	// Even the deadline alone doesn't fit at this width. Truncate its plain
 	// text and re-style, rather than slicing the ANSI-wrapped dl string.
-	u := task.DeadlineUrgency(t, m.now())
+	u := task.DeadlineUrgency(t, m.now(), m.board.DoneStatus())
 	plain := "● " + FormatDate(*t.Deadline)
 	if u == task.UrgencyOverdue {
 		plain += " ✗"

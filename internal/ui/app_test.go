@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -441,5 +442,106 @@ func TestViewNeverExceedsTerminalHeight(t *testing.T) {
 			t.Fatalf("height=%d: the calendar is not open on the Deadline field, test setup is broken", h)
 		}
 		check("form + calendar open", a4)
+	}
+}
+
+// The tab bar names the pages on top; the way out is a footer hint on each
+// page, next to the keys that live there — never a page-specific wording.
+func TestTabsNamePagesOnTopWithFooterHints(t *testing.T) {
+	a := app(t)
+	out := stripANSI(a.View())
+	lines := strings.Split(out, "\n")
+	if !strings.Contains(lines[0], "BOARD") || !strings.Contains(lines[0], "CALENDAR") {
+		t.Errorf("first line is not the tab bar:\n%s", out)
+	}
+	if strings.Contains(out, "tab to switch") {
+		t.Errorf("tab bar still carries the hint:\n%s", out)
+	}
+	if !strings.Contains(out, "m grab · tab switch · ? help") {
+		t.Errorf("board footer is missing the tab switch hint:\n%s", out)
+	}
+	for _, stale := range []string{"tab analytics", "tab board", "tab back to the board"} {
+		if strings.Contains(out, stale) {
+			t.Errorf("board view still says %q:\n%s", stale, out)
+		}
+	}
+
+	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = m.(AppModel).Update(tea.KeyMsg{Type: tea.KeyTab})
+	m, _ = m.(AppModel).Update(tea.KeyMsg{Type: tea.KeyTab})
+	out = stripANSI(m.(AppModel).View())
+	if !strings.Contains(out, "t today · tab switch") {
+		t.Errorf("calendar footer is missing the tab switch hint:\n%s", out)
+	}
+}
+
+// An agent writing headless while the board is open appears on the next
+// refresh tick: the user watches it land with no keypress.
+func TestRefreshTickPicksUpExternalWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "board.json")
+	b := &task.Board{}
+	b.SetPath(path)
+	b.Add("[Mine]", "", nil, ref)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp(b)
+	m, _ := a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a = m.(AppModel)
+
+	agent, err := task.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.Add("[Agent]", "", nil, ref)
+	if err := agent.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ = a.Update(refreshTickMsg(time.Now()))
+	out := stripANSI(m.(AppModel).View())
+	if !strings.Contains(out, "[Agent]") {
+		t.Errorf("open board is missing the agent's card after a tick:\n%s", out)
+	}
+}
+
+// A tick never yanks unsaved keystrokes away: a dirty board skips the
+// refresh and converges on a later tick once saved.
+func TestRefreshTickSkipsDirtyBoard(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "board.json")
+	b := &task.Board{}
+	b.SetPath(path)
+	b.Add("[Mine]", "", nil, ref)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	a := NewApp(b)
+	m, _ := a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a = m.(AppModel)
+
+	a.store.Add("[Unsaved]", "", nil, ref)
+	agent, err := task.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.Add("[Agent]", "", nil, ref)
+	if err := agent.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	m, _ = a.Update(refreshTickMsg(time.Now()))
+	out := stripANSI(m.(AppModel).View())
+	if strings.Contains(out, "[Agent]") {
+		t.Errorf("dirty board picked up external writes mid-typing:\n%s", out)
+	}
+	if !strings.Contains(out, "[Unsaved]") {
+		t.Errorf("dirty board lost its own unsaved card:\n%s", out)
+	}
+
+	m, _ = m.(AppModel).Update(dirtyMsg{})
+	m, _ = m.(AppModel).Update(refreshTickMsg(time.Now()))
+	out = stripANSI(m.(AppModel).View())
+	if !strings.Contains(out, "[Agent]") || !strings.Contains(out, "[Unsaved]") {
+		t.Errorf("saved board is missing a side after converging:\n%s", out)
 	}
 }

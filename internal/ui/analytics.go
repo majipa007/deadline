@@ -13,10 +13,9 @@ import (
 
 const (
 	throughputDays = 14
-	// streakMonths is the most month grids the streak calendar shows; three
-	// cover about the same span as the 12-week heatmap it replaced, and fit
-	// a 90-column terminal.
-	streakMonths = 3
+	// streakMonths is the most month grids the streak calendar shows; six
+	// fill a wide terminal, and narrow ones show fewer, down to one.
+	streakMonths = 6
 	blockedTopN  = 5
 )
 
@@ -53,9 +52,9 @@ func (m AnalyticsModel) View() string {
 }
 
 func (m AnalyticsModel) renderTiles(tasks []task.Task) string {
-	counts := stats.Counts(tasks)
-	tiles := make([]string, 0, len(task.Statuses))
-	for _, s := range task.Statuses {
+	counts := stats.Counts(tasks, m.board.Statuses())
+	tiles := make([]string, 0, len(m.board.Statuses()))
+	for _, s := range m.board.Statuses() {
 		body := lipgloss.JoinVertical(lipgloss.Center,
 			lipgloss.NewStyle().Bold(true).Foreground(AccentFor(s)).
 				Render(fmt.Sprintf("%d", counts[s])),
@@ -67,7 +66,7 @@ func (m AnalyticsModel) renderTiles(tasks []task.Task) string {
 }
 
 func (m AnalyticsModel) renderThroughput(tasks []task.Task, now time.Time) string {
-	series := stats.Throughput(tasks, throughputDays, now)
+	series := stats.Throughput(tasks, throughputDays, now, m.board.DoneStatus())
 	values := make([]int, len(series))
 	total := 0
 	for i, d := range series {
@@ -75,7 +74,7 @@ func (m AnalyticsModel) renderThroughput(tasks []task.Task, now time.Time) strin
 		total += d.N
 	}
 
-	line := lipgloss.NewStyle().Foreground(AccentFor(task.StatusDone)).
+	line := lipgloss.NewStyle().Foreground(AccentFor(m.board.DoneStatus())).
 		Render(Sparkline(values))
 
 	span := ""
@@ -93,7 +92,7 @@ func (m AnalyticsModel) renderThroughput(tasks []task.Task, now time.Time) strin
 }
 
 func (m AnalyticsModel) renderCycle(tasks []task.Task, now time.Time) string {
-	c := stats.CycleTimes(tasks, now)
+	c := stats.CycleTimes(tasks, now, m.board.DoneStatus())
 	lines := []string{TitleStyle.Render("CYCLE TIME")}
 
 	if c.N == 0 {
@@ -105,20 +104,34 @@ func (m AnalyticsModel) renderCycle(tasks []task.Task, now time.Time) string {
 	lines = append(lines, MutedStyle.Render("mean time spent per column:"))
 
 	maxMinutes := 0
-	for _, s := range task.Statuses {
+	for _, s := range m.board.Statuses() {
 		if v := int(c.PerColumn[s].Minutes()); v > maxMinutes {
 			maxMinutes = v
 		}
 	}
-	for _, s := range task.Statuses {
+	barWidth := m.barWidth()
+	for _, s := range m.board.Statuses() {
 		d := c.PerColumn[s]
-		bar := HBar(strings.ToLower(s.Label()), int(d.Minutes()), maxMinutes, 24)
+		bar := HBar(strings.ToLower(s.Label()), int(d.Minutes()), maxMinutes, barWidth)
 		// Replace the raw minute count with a human duration.
 		bar = strings.TrimSuffix(bar, fmt.Sprintf(" %d", int(d.Minutes())))
 		lines = append(lines, lipgloss.NewStyle().Foreground(AccentFor(s)).Render(bar)+
 			" "+MutedStyle.Render(FormatDuration(d)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// barWidth stretches the cycle-time bars across the terminal instead of a
+// fixed 24 cells, so the section grows with the board. An unknown width
+// keeps the old fixed size.
+func (m AnalyticsModel) barWidth() int {
+	if m.width <= 0 {
+		return 24
+	}
+	if w := m.width - 32; w > 24 {
+		return w
+	}
+	return 24
 }
 
 func (m AnalyticsModel) renderBlocked(tasks []task.Task, now time.Time) string {
@@ -150,8 +163,8 @@ func (m AnalyticsModel) renderBlocked(tasks []task.Task, now time.Time) string {
 // grids rather than an anonymous 12-week strip: the same span, but every
 // mark sits on a date you can name.
 func (m AnalyticsModel) renderStreak(tasks []task.Task, now time.Time) string {
-	current, longest := stats.Streak(tasks, now)
-	byDay := stats.CompletionsByDay(tasks, now.Location())
+	current, longest := stats.Streak(tasks, now, m.board.DoneStatus())
+	byDay := stats.CompletionsByDay(tasks, now.Location(), m.board.DoneStatus())
 
 	n := monthsAcross(m.width, streakMonths)
 	first := monthStart(now).AddDate(0, -(n - 1), 0)

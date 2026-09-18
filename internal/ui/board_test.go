@@ -316,6 +316,66 @@ func TestDeleteCancelledByN(t *testing.T) {
 	}
 }
 
+// The reported bug end to end: a card in a dev column, deleted with d/y,
+// must stay deleted after the save and the next load — the merge step in
+// Save used to resurrect it from the on-disk copy.
+func TestDevBoardDeleteSurvivesSaveReload(t *testing.T) {
+	path := t.TempDir() + "/board.json"
+	b, err := task.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.SetColumns(task.DevColumns)
+	drop := b.Add("[Drop]", "", nil, ref).ID
+	if err := b.Move(drop, task.StatusTestingReview, ref); err != nil {
+		t.Fatal(err)
+	}
+	keep := b.Add("[Keep]", "", nil, ref).ID
+	if err := b.Move(keep, task.StatusInDev, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh session, the way the TUI opens the board.
+	fresh, err := task.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := fixedClock(NewBoardModel(fresh))
+	m = press(m, "l", "l") // todo -> indev -> testing-review
+	if got, ok := m.selectedTask(); !ok || got.ID != drop {
+		t.Fatalf("selected = %+v, want the testing-review card", got)
+	}
+	m = press(m, "d")
+	if m.mode != modeConfirm {
+		t.Fatalf("mode = %v, want modeConfirm", m.mode)
+	}
+	var cmd tea.Cmd
+	m, cmd = m.Update(key("y"))
+	if cmd == nil {
+		t.Fatal("confirm returned a nil cmd, want the dirty save trigger")
+	}
+	if _, ok := cmd().(dirtyMsg); !ok {
+		t.Errorf("cmd produced %T, want dirtyMsg", cmd())
+	}
+	if len(m.board.Tasks) != 1 {
+		t.Fatalf("Tasks = %d after confirming, want 1", len(m.board.Tasks))
+	}
+	// The dirty path: AppModel would Save here, then a reopen must agree.
+	if err := m.board.Save(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := task.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(re.Tasks) != 1 || re.Tasks[0].ID != keep {
+		t.Fatalf("reloaded = %+v, want only the kept card", re.Tasks)
+	}
+}
+
 func TestGrabMoveAndDrop(t *testing.T) {
 	b := &task.Board{}
 	b.Add("[Task title]", "", nil, ref)
@@ -733,7 +793,7 @@ func TestParseDeadlineThenUrgencyIsNotOffByOneWestOfUTC(t *testing.T) {
 		t.Fatalf("parseDeadline returned %v", err)
 	}
 	tt := task.Task{Title: "[Task title]", Status: task.StatusTodo, CreatedAt: now, Deadline: deadline}
-	if got := task.DeadlineUrgency(tt, now); got != task.UrgencyUrgent {
+	if got := task.DeadlineUrgency(tt, now, task.StatusDone); got != task.UrgencyUrgent {
 		t.Errorf("urgency = %v, want UrgencyUrgent for a deadline due today in a negative-offset zone", got)
 	}
 }
@@ -802,8 +862,8 @@ func TestFormSavesAllThreeFields(t *testing.T) {
 	if got.Description != "[draft, review, send]" {
 		t.Errorf("Description = %q", got.Description)
 	}
-	if got.Deadline == nil || !got.Deadline.Equal(time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)) {
-		t.Errorf("Deadline = %v, want 02/08/2026", got.Deadline)
+	if got.Deadline == nil || got.Deadline.Format("02/01/2006") != "02/08/2026" {
+		t.Errorf("Deadline = %v, want the 02/08/2026 calendar day in the local zone", got.Deadline)
 	}
 }
 
@@ -1317,7 +1377,9 @@ func withDeadline(day time.Time) *task.Board {
 }
 
 func TestDetailPopupShowsTheDeadlineOnACalendar(t *testing.T) {
-	m := fixedClock(NewBoardModel(withDeadline(time.Date(2026, 8, 12, 0, 0, 0, 0, time.Local))))
+	// UTC midnight: the popup renders in now's zone (ref is UTC), so a
+	// local-midnight deadline would show the neighbouring day off-UTC.
+	m := fixedClock(NewBoardModel(withDeadline(time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))))
 	m.SetSize(120, 40)
 	out := stripANSI(press(m, "enter").View())
 
@@ -1362,7 +1424,8 @@ func TestDetailPopupNeverExceedsTerminalHeight(t *testing.T) {
 // On a terminal too short for everything, the calendar goes before the
 // description does, and the description is clipped rather than overflowing.
 func TestDetailPopupClipsTheDescriptionBeforeOverflowing(t *testing.T) {
-	b := withDeadline(time.Date(2026, 8, 12, 0, 0, 0, 0, time.Local))
+	// UTC midnight, matching the UTC test clock (see above).
+	b := withDeadline(time.Date(2026, 8, 12, 0, 0, 0, 0, time.UTC))
 	b.Tasks[0].Description = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
 
 	m := fixedClock(NewBoardModel(b))

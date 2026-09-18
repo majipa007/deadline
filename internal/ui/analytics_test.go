@@ -262,3 +262,20 @@ func TestAnalyticsViewEmptyBoardDoesNotPanic(t *testing.T) {
 		t.Errorf("View of an empty board is missing its sections:\n%s", out)
 	}
 }
+
+// Cycle bars stretch with the terminal instead of a fixed 24 cells, so the
+// section holds its own next to a full-width board.
+func TestCycleBarsScaleWithTerminalWidth(t *testing.T) {
+	m := NewAnalyticsModel(&task.Board{})
+	if got := m.barWidth(); got != 24 {
+		t.Errorf("barWidth() with unknown width = %d, want 24", got)
+	}
+	m.SetSize(40, 40)
+	if got := m.barWidth(); got != 24 {
+		t.Errorf("barWidth() at 40 columns = %d, want the 24-cell floor", got)
+	}
+	m.SetSize(200, 40)
+	if got := m.barWidth(); got != 168 {
+		t.Errorf("barWidth() at 200 columns = %d, want 168", got)
+	}
+}

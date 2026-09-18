@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -36,6 +37,11 @@ type AppModel struct {
 	width  int
 	height int
 
+	// boardMod/boardSize track the board file as last seen, so the refresh
+	// tick can spot writes from other sessions (agents logging headless).
+	boardMod  time.Time
+	boardSize int64
+
 	now func() time.Time
 }
 
@@ -59,8 +65,21 @@ func archiveTick() tea.Cmd {
 	return tea.Tick(time.Hour, func(t time.Time) tea.Msg { return archiveTickMsg(t) })
 }
 
-// Init starts the hourly archive sweep.
-func (m AppModel) Init() tea.Cmd { return archiveTick() }
+// refreshInterval is how often an open board looks for writes from other
+// sessions. Two seconds keeps an agent's cards appearing live without any
+// measurable cost: it is one stat call when nothing changed.
+const refreshInterval = 2 * time.Second
+
+// refreshTickMsg fires on that interval so an open board picks up headless
+// writes (agents logging in parallel) without any keypress.
+type refreshTickMsg time.Time
+
+func refreshTick() tea.Cmd {
+	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshTickMsg(t) })
+}
+
+// Init starts the hourly archive sweep and the refresh poll.
+func (m AppModel) Init() tea.Cmd { return tea.Batch(archiveTick(), refreshTick()) }
 
 // Update routes global keys itself and forwards the rest to the active page.
 func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -80,6 +99,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.saveErr = ""
 		}
+		m.noteBoardStat()
 		return m, nil
 
 	case archiveTickMsg:
@@ -88,6 +108,28 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(dirty(), archiveTick())
 		}
 		return m, archiveTick()
+
+	case refreshTickMsg:
+		// Re-arm first: every path below must keep polling.
+		cmd := refreshTick()
+		// Only refresh over a clean, non-modal board. Unsaved keystrokes
+		// (dirty) or an open form/move/confirm/detail must never be
+		// yanked away mid-interaction; the next tick retries instead.
+		if m.board.mode == modeNormal && !m.store.Dirty() {
+			if changed, _ := m.boardChanged(); changed {
+				// Clean means memory holds nothing the disk lacks, so a
+				// wholesale reload drops nothing of ours. Tombstones are
+				// carried over so a concurrently re-saved deleted task is
+				// not merged back on the next Save.
+				if fresh, err := task.Load(m.store.Path()); err == nil {
+					fresh.CarryTombstonesFrom(m.store)
+					*m.store = *fresh
+					m.board.clampSelection()
+					m.noteBoardStat()
+				}
+			}
+		}
+		return m, cmd
 
 	case tea.KeyMsg:
 		// Every non-normal board mode is modal with respect to the global
@@ -154,7 +196,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the tab bar plus the active page, or the help overlay.
+// View renders the tab bar above the active page, or the help overlay.
+// The bar names the pages; the way out is a footer hint on each page
+// ("tab switch"), next to the keys that live there.
 func (m AppModel) View() string {
 	if m.showHelp {
 		return m.renderHelp()
@@ -175,6 +219,27 @@ func (m AppModel) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
+// noteBoardStat records the board file as currently on disk. Called after
+// every save and refresh so the next tick compares against fresh state.
+func (m *AppModel) noteBoardStat() {
+	if st, err := os.Stat(m.store.Path()); err == nil {
+		m.boardMod, m.boardSize = st.ModTime(), st.Size()
+	}
+}
+
+// boardChanged reports whether the board file differs from the last noted
+// state. A vanished file is not a change: the next save recreates it.
+func (m AppModel) boardChanged() (bool, error) {
+	st, err := os.Stat(m.store.Path())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return !st.ModTime().Equal(m.boardMod) || st.Size() != m.boardSize, nil
+}
+
 func (m AppModel) renderTabs() string {
 	active := lipgloss.NewStyle().Bold(true).Foreground(ColAccent).Padding(0, 2)
 	inactive := MutedStyle.Copy().Padding(0, 2)
@@ -188,7 +253,6 @@ func (m AppModel) renderTabs() string {
 		}
 		tabs = append(tabs, inactive.Render(n))
 	}
-	tabs = append(tabs, MutedStyle.Render("  tab to switch"))
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 

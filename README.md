@@ -5,8 +5,8 @@
 *Green. Amber. Red. Then a cross.*
 
 ![Go](https://img.shields.io/badge/go-1.22-00ADD8?logo=go&logoColor=white)
-![Stars](https://img.shields.io/github/stars/majipa007/deadline?style=flat)
-![Last commit](https://img.shields.io/github/last-commit/majipa007/deadline)
+![Stars](https://img.shields.io/github/stars/19Naveen/deadline?style=flat)
+![Last commit](https://img.shields.io/github/last-commit/19Naveen/deadline)
 
 A terminal kanban board that never lets you forget when something is due.
 
@@ -19,7 +19,7 @@ A terminal kanban board that never lets you forget when something is due.
 Four columns. Three-line cards. Dates that change colour as they close in.
 
 ```
-  BOARD    ANALYTICS    ARCHIVE    CALENDAR    tab to switch
+  BOARD    ANALYTICS    ARCHIVE    CALENDAR
 ╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮
 │ TODO (3)             ││ DOING (1)            ││ BLOCKED (1)          ││ DONE (1)             │
 │                      ││                      ││                      ││                      │
@@ -35,7 +35,7 @@ Four columns. Three-line cards. Dates that change colour as they close in.
 │  Third follow-up     ││                      ││                      ││                      │
 │  ● 27/07/2026 ✗      ││                      ││                      ││                      │
 ╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯
-focus: item (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab analytics · ? help
+focus: item (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab switch · ? help · q quit
 ```
 
 No mouse. No config file. No account.
@@ -96,7 +96,7 @@ current 1 day · longest 1 day
 
 Cycle time runs from created to done. Time-per-column shows where work actually sits, which is rarely where you think.
 
-The streak is three real months, not an anonymous strip: a day you finished something is shaded, darker the more you closed, and today is underlined. Narrow the terminal and it drops to two months, then one.
+The streak is up to six real months, not an anonymous strip: a day you finished something is shaded, darker the more you closed, and today is underlined. Narrow the terminal and it shows fewer months, down to one.
 
 ---
 
@@ -132,7 +132,7 @@ UPCOMING
 
 `h` and `l` step a month either way, `t` comes back to this one. A day with more than one deadline takes the colour of its most pressing task.
 
-Done tasks are left off: a deadline you already met is history, and this page is about what is coming. Three months need 90 columns; below that it shows two, and below 59 just one. The upcoming list fills whatever rows are left and says how many it could not fit.
+Done tasks are left off: a deadline you already met is history, and this page is about what is coming. Each month needs about 31 columns, so a wide terminal shows up to six side by side; 90 columns fit three, and below 59 just one. The upcoming list fills whatever rows are left and says how many it could not fit.
 
 ---
 
@@ -140,11 +140,31 @@ Done tasks are left off: a deadline you already met is history, and this page is
 
 Needs Go 1.22 or newer, and a terminal at least 80 columns wide.
 
+**Quick install** (Debian, Ubuntu, Arch, Fedora, openSUSE, Alpine — sets up `~/.bashrc` and `~/.zshrc` automatically):
+
 ```bash
-git clone git@github.com:majipa007/deadline.git
+curl -fsSL https://raw.githubusercontent.com/19Naveen/deadline/main/install.sh | bash
+```
+
+The script detects your distro (`apt`, `pacman`, `dnf`/`yum`, `zypper`, `apk`), installs `git` and Go ≥ 1.22 if missing (falling back to an official Go toolchain in `~/.local/go` when the distro package is too old or root is unavailable), builds `gotodo` into `~/.local/bin`, and adds it to `PATH` in both `~/.bashrc` and `~/.zshrc` without duplicating lines. It also installs the `deadline` agent skill for Claude Code, Codex, OpenCode and other Agent-Skills-compatible tools, so coding agents can log work to project boards. Restart your terminal afterwards, then run `gotodo`.
+
+**Manual install:**
+
+```bash
+git clone https://github.com/19Naveen/deadline.git
 cd deadline
 go build -trimpath -ldflags "-s -w" -o ~/.local/bin/gotodo .
 ```
+
+**Upgrade:** re-run the installer — it rebuilds only when `main` moved past your installed copy (checked via `gotodo version`), otherwise it just re-syncs the skill and PATH lines.
+
+**Uninstall:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/19Naveen/deadline/main/install.sh | bash -s -- --uninstall
+```
+
+This removes the binary, the agent skills and the PATH lines it added. Boards are data, not installation, so `~/.config/gotodo` and `.deadline/` in projects are kept — delete them too for a full wipe.
 
 Then run it:
 
@@ -204,15 +224,48 @@ along. `tab` and `enter` behave exactly as they do on the other two fields.
 
 ## Storage
 
-One JSON file, `~/.config/gotodo/tasks.json`. Point somewhere else with `-file`:
+Two boards, never mixed. Outside any project, `gotodo` opens your personal board, one JSON file at `~/.config/gotodo/tasks.json`. Inside an initialised project (any directory at or under one containing `.deadline/board.json`), it opens that project's board instead — one project never sees another project's tasks. Point anywhere else with `-file`:
 
 ```bash
 gotodo -file ./work.json
 ```
 
-Separate files are separate boards, which is the easiest way to keep work and personal apart.
+Every change writes through a temporary file and a rename, so an interrupted write cannot leave you with half a board. A session where you changed nothing does not write at all. Concurrent writers merge by task under a brief file lock, so an agent logging while your board is open never drops your cards — and vice versa; two sessions editing the same card resolve last-writer-wins.
 
-Every change writes through a temporary file and a rename, so an interrupted write cannot leave you with half a board. A session where you changed nothing does not write at all, which matters if you ever have two copies open.
+---
+
+## Project boards
+
+A project board is the dev pipeline: `TODO → IN DEV → TESTING/REVIEW → BLOCKED → SHIPPED`, with shipped playing the role done plays on the personal board (grey deadlines, throughput, streak, and the 14-day archive sweep). The personal board keeps the original four columns. Five columns need a wider terminal — about 100 columns instead of 80.
+
+Create one per project:
+
+```bash
+cd my-project
+gotodo init
+```
+
+This writes `.deadline/board.json` and adds `.deadline/` to the project's `.gitignore`, creating the file when the project has none yet. Running `init` twice, or inside a subdirectory, reuses the existing board instead of nesting a new one. (A nested board is still possible by hand-creating `.deadline/board.json`; the nearest file always wins.)
+
+Separate files are separate boards, which is the easiest way to keep work and personal apart — and project boards are how agents log development in parallel with your own list (see below).
+
+---
+
+## Agents
+
+Coding agents can't drive the interactive board, so `gotodo` has headless commands with plain-text output. They run against the project board when invoked in the project directory:
+
+```bash
+gotodo init                                    # once per project (skip if .deadline/ exists)
+gotodo add "Rewrite the parser" -desc "Split the lexer" -deadline 04/08/2026
+gotodo list
+gotodo list -status blocked
+gotodo move 3fa1c9e2 testing-review          # any unique id prefix works
+```
+
+The global `-file` flag must precede the subcommand (`gotodo -file ./work.json list`). A bare `gotodo -h`, or `init`, `add` or `list` with `-h`, prints help without changing anything.
+
+The installer drops a `deadline` skill (`skills/deadline/SKILL.md` in this repo) into the Claude, Codex, OpenCode and shared agent skills directories, so agents discover this workflow on their own. An open board picks up agent writes within a couple of seconds — no restart needed. The whole skill is ~200 words — it stays out of the way until needed.
 
 ---
 
@@ -239,10 +292,10 @@ Not from inside the app. Edit the JSON and drop the `"archived": true` line.
 Long enough that a finished task is still there when someone asks about it. Short enough that Done does not become a scrapbook.
 
 **Does it sync?**
-No. It is one file. Put it in a synced folder if you want it on two machines, but two copies open at once will overwrite each other.
+No. It is one file. Put it in a synced folder if you want it on two machines. Two sessions open at once merge by task instead of overwriting each other, with the later save winning any card both touched.
 
 **Why does it say my terminal is too narrow?**
-Four columns and a date need 80 columns. Below that it tells you, instead of drawing a board that overlaps itself. Analytics and Archive are single-column and stay readable at any width.
+Four columns and a date need 80 columns (about 100 for a five-column project board). Below that it tells you, instead of drawing a board that overlaps itself. Analytics and Archive are single-column and stay readable at any width.
 
 **Do old task files still work?**
 Yes. Files written before descriptions and deadlines existed load fine, with those fields empty.

@@ -83,7 +83,7 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestRenderDeadlineEmptyWithoutDeadline(t *testing.T) {
-	got := RenderDeadline(task.Task{Status: task.StatusTodo}, chartRef)
+	got := RenderDeadline(task.Task{Status: task.StatusTodo}, chartRef, task.StatusDone)
 	if got != "" {
 		t.Errorf("RenderDeadline = %q, want empty for a task with no deadline", got)
 	}
@@ -93,7 +93,7 @@ func TestRenderDeadlineShowsSingaporeDate(t *testing.T) {
 	due := chartRef.AddDate(0, 0, 5)
 	tk := task.Task{Status: task.StatusTodo, Deadline: &due}
 
-	got := stripANSI(RenderDeadline(tk, chartRef))
+	got := stripANSI(RenderDeadline(tk, chartRef, task.StatusDone))
 	if !strings.Contains(got, "04/08/2026") {
 		t.Errorf("RenderDeadline = %q, want it to contain 04/08/2026", got)
 	}
@@ -109,7 +109,7 @@ func TestRenderDeadlineMarksOverdue(t *testing.T) {
 	due := chartRef.AddDate(0, 0, -2)
 	tk := task.Task{Status: task.StatusTodo, Deadline: &due}
 
-	got := stripANSI(RenderDeadline(tk, chartRef))
+	got := stripANSI(RenderDeadline(tk, chartRef, task.StatusDone))
 	if !strings.Contains(got, "28/07/2026") {
 		t.Errorf("RenderDeadline = %q, want it to contain 28/07/2026", got)
 	}
@@ -146,9 +146,9 @@ func TestRenderDeadlineDateAgreesWithUrgencyAcrossTimezones(t *testing.T) {
 	// test states the invariant (render and urgency agree) rather than one
 	// timezone library's specific offset arithmetic.
 	wantDate := FormatDate(due.In(now.Location()))
-	wantOverdue := task.DeadlineUrgency(tk, now) == task.UrgencyOverdue
+	wantOverdue := task.DeadlineUrgency(tk, now, task.StatusDone) == task.UrgencyOverdue
 
-	got := stripANSI(RenderDeadline(tk, now))
+	got := stripANSI(RenderDeadline(tk, now, task.StatusDone))
 	if !strings.Contains(got, wantDate) {
 		t.Errorf("RenderDeadline = %q, want it to contain %q — the date in now's zone, the same zone the urgency bucket is computed in", got, wantDate)
 	}
@@ -161,7 +161,7 @@ func TestRenderDeadlineDoneTaskHasNoCross(t *testing.T) {
 	due := chartRef.AddDate(0, 0, -30)
 	tk := task.Task{Status: task.StatusDone, Deadline: &due}
 
-	got := stripANSI(RenderDeadline(tk, chartRef))
+	got := stripANSI(RenderDeadline(tk, chartRef, task.StatusDone))
 	if strings.Contains(got, "✗") {
 		t.Errorf("RenderDeadline = %q, want no ✗ on a completed task", got)
 	}

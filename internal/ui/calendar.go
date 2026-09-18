@@ -114,13 +114,13 @@ func completionCell(byDay map[time.Time]int, max int, today time.Time) monthCell
 // urgency colour the card carries: green further out, amber within three
 // days, red today, tomorrow or already missed. A day with several deadlines
 // takes the colour of its most pressing one.
-func deadlineCell(byDay map[time.Time][]task.Task, today time.Time) monthCell {
+func deadlineCell(byDay map[time.Time][]task.Task, today time.Time, done task.Status) monthCell {
 	return func(day time.Time) (string, lipgloss.Style) {
 		due := byDay[task.StartOfDay(day)]
 		text, style := fmt.Sprintf(" %2d ", day.Day()), MutedStyle
 		if len(due) > 0 {
 			text = fmt.Sprintf("●%2d ", day.Day())
-			style = lipgloss.NewStyle().Foreground(UrgencyColor(worstUrgency(due, today))).Bold(true)
+			style = lipgloss.NewStyle().Foreground(UrgencyColor(worstUrgency(due, today, done))).Bold(true)
 		}
 		if sameDay(day, today) {
 			style = style.Copy().Underline(true)
@@ -131,19 +131,20 @@ func deadlineCell(byDay map[time.Time][]task.Task, today time.Time) monthCell {
 
 // worstUrgency is the most pressing urgency among tasks. The Urgency
 // constants are declared in ascending pressure, so the largest wins.
-func worstUrgency(tasks []task.Task, now time.Time) task.Urgency {
+func worstUrgency(tasks []task.Task, now time.Time, done task.Status) task.Urgency {
 	worst := task.UrgencyNone
 	for _, t := range tasks {
-		if u := task.DeadlineUrgency(t, now); u > worst {
+		if u := task.DeadlineUrgency(t, now, done); u > worst {
 			worst = u
 		}
 	}
 	return worst
 }
 
-// calendarMonths is the most months the deadline page shows at once; three
-// fit a 90-column terminal, which is what monthsAcross falls back from.
-const calendarMonths = 3
+// calendarMonths is the most months the deadline page shows at once; six
+// fill a wide terminal the way three fit a 90-column one, which is what
+// monthsAcross falls back from.
+const calendarMonths = 6
 
 // upcomingMin is how many rows of the upcoming list survive on a short
 // terminal. One: even squeezed to nothing the list still says how much it
@@ -190,11 +191,13 @@ func (m CalendarModel) Update(msg tea.Msg) (CalendarModel, tea.Cmd) {
 }
 
 // dated is every task on the board that has a deadline and is not finished:
-// a done task's deadline is history, and this page is about what is coming.
+// a task in the terminal column is history, and this page is about what is
+// coming.
 func (m CalendarModel) dated() []task.Task {
+	done := m.board.DoneStatus()
 	var out []task.Task
 	for _, t := range m.board.Active() {
-		if t.Status != task.StatusDone {
+		if t.Status != done {
 			out = append(out, t)
 		}
 	}
@@ -209,7 +212,7 @@ func (m CalendarModel) View() string {
 
 	n := monthsAcross(m.width, calendarMonths)
 	first := monthStart(now).AddDate(0, m.offset, 0)
-	strip := monthStrip(first, n, deadlineCell(byDay, now))
+	strip := monthStrip(first, n, deadlineCell(byDay, now, m.board.DoneStatus()))
 
 	sections := []string{
 		TitleStyle.Render("DEADLINES"),
@@ -220,7 +223,7 @@ func (m CalendarModel) View() string {
 	if m.offset != 0 {
 		sections[0] += MutedStyle.Render(fmt.Sprintf("  %+d months from today", m.offset))
 	}
-	sections = append(sections, HelpStyle.Render("h/l month · t today · tab board"))
+	sections = append(sections, HelpStyle.Render("h/l month · t today · tab switch"))
 	return strings.Join(sections, "\n")
 }
 
@@ -252,7 +255,7 @@ func (m CalendarModel) renderUpcoming(tasks []task.Task, now time.Time, strip st
 		width = 80
 	}
 	for _, t := range shown {
-		u := task.DeadlineUrgency(t, now)
+		u := task.DeadlineUrgency(t, now, m.board.DoneStatus())
 		lines = append(lines, fmt.Sprintf("%s  %-*s %s",
 			lipgloss.NewStyle().Foreground(UrgencyColor(u)).Render("● "+FormatDate(t.Deadline.In(now.Location()))),
 			max(width-40, 20), truncate(t.Title, max(width-40, 20)),

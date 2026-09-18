@@ -1,3 +1,4 @@
 gotodo
 *.tmp
 .superpowers/
+.deadline/

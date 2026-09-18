@@ -14,13 +14,65 @@ var ErrNotFound = errors.New("task not found")
 // rather than stored separately, so a move is a single field write.
 type Board struct {
 	Tasks []Task `json:"tasks"`
+	// Columns is the board's left-to-right column order. Empty means a file
+	// written before per-board columns existed, which reads as the personal
+	// preset; Statuses resolves that so callers never branch on it.
+	Columns []Status `json:"columns,omitempty"`
 
 	path  string // where Save writes; unexported so it stays out of the JSON
 	dirty bool   // true when there are unsaved mutations; unexported, not serialised
+	// deleted is the set of task IDs removed by Delete this session.
+	// mergeDisk consults it so a deleted task is not re-appended from the
+	// disk copy at Save time (which would resurrect every delete).
+	// Unexported, never serialised; IDs are never reused, so entries stay
+	// valid for the session's lifetime.
+	deleted map[string]struct{}
+}
+
+// Statuses returns the board's columns, defaulting to the personal preset
+// for files that predate per-board columns.
+func (b *Board) Statuses() []Status {
+	if len(b.Columns) > 0 {
+		return b.Columns
+	}
+	return Statuses
+}
+
+// DoneStatus is the board's terminal column: done on personal boards,
+// shipped on dev boards. Archiving, analytics and urgency all key off this,
+// never off a hard-coded status.
+func (b *Board) DoneStatus() Status {
+	cols := b.Statuses()
+	return cols[len(cols)-1]
+}
+
+// ColumnIndex is the column position of s, 0-based. Unknown statuses report
+// -1 so callers can tell "not on this board" apart from "first column".
+func (b *Board) ColumnIndex(s Status) int {
+	for i, c := range b.Statuses() {
+		if c == s {
+			return i
+		}
+	}
+	return -1
+}
+
+// HasStatus reports whether s is a column on this board.
+func (b *Board) HasStatus(s Status) bool { return b.ColumnIndex(s) >= 0 }
+
+// SetColumns replaces the board's column layout (used when initialising a
+// new board file) and marks the board dirty. Direct assignment would bypass
+// dirty tracking and a later Save would skip the write.
+func (b *Board) SetColumns(cols []Status) {
+	b.Columns = append([]Status(nil), cols...)
+	b.dirty = true
 }
 
 // Dirty reports whether the board has mutations not yet written by Save.
 func (b *Board) Dirty() bool { return b.dirty }
+
+// Path reports the file Save writes to ("" when unset).
+func (b *Board) Path() string { return b.path }
 
 // Add appends a new todo task and returns a pointer into b.Tasks. The
 // pointer is only valid until the next Add — take the ID off it, never
@@ -78,16 +130,36 @@ func (b *Board) Edit(id, title, description string, deadline *time.Time, now tim
 	return nil
 }
 
-// Delete removes a task permanently.
+// Delete removes a task permanently. The ID is recorded as a tombstone so a
+// later Save does not merge it back from the on-disk copy.
 func (b *Board) Delete(id string) error {
 	for i := range b.Tasks {
 		if b.Tasks[i].ID == id {
 			b.Tasks = append(b.Tasks[:i], b.Tasks[i+1:]...)
+			if b.deleted == nil {
+				b.deleted = make(map[string]struct{})
+			}
+			b.deleted[id] = struct{}{}
 			b.dirty = true
 			return nil
 		}
 	}
 	return ErrNotFound
+}
+
+// CarryTombstonesFrom copies the deleted-ID tombstones from prev onto b, so
+// a wholesale reload (live refresh) does not lose track of this session's
+// deletes. Call before replacing *b with a freshly loaded board.
+func (b *Board) CarryTombstonesFrom(prev *Board) {
+	if len(prev.deleted) == 0 {
+		return
+	}
+	if b.deleted == nil {
+		b.deleted = make(map[string]struct{}, len(prev.deleted))
+	}
+	for id := range prev.deleted {
+		b.deleted[id] = struct{}{}
+	}
 }
 
 // ByStatus returns the non-archived tasks in one column, in insertion order.
