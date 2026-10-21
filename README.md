@@ -16,26 +16,28 @@ A terminal kanban board that never lets you forget when something is due.
 
 ## The board
 
-Four columns. Three-line cards. Dates that change colour as they close in.
+Four columns. Two-line cards. A countdown on each card that gets louder as the day closes in.
 
 ```
-  BOARD    ANALYTICS    ARCHIVE    CALENDAR
+  Board    Analytics    Archive    Calendar
 ╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮
 │ TODO (3)             ││ DOING (1)            ││ BLOCKED (1)          ││ DONE (1)             │
 │                      ││                      ││                      ││                      │
-│ │ Ship the Q3 report ││  Rewrite the parser  ││  Waiting on design   ││  Drop the old API    │
-│ │ Draft, review, se… ││  Split the lexer o…  ││  Mocks not landed    ││                      │
-│ │ ● 09/08/2026       ││  ● 03/08/2026        ││  ● 06/08/2026        ││                      │
+│ ▌ Ship the Q3 re… 6d ││   Rewrite the pa… 2d ││   Waiting on de… 12d ││   Drop the old API   │
+│ ▌ Draft, review, se… ││   Split the lexer o… ││   Mocks not landed   ││                      │
 │                      ││                      ││                      ││                      │
-│  Renew the TLS cert  ││                      ││                      ││                      │
-│  Staging box         ││                      ││                      ││                      │
-│  ● 01/08/2026        ││                      ││                      ││                      │
+│   Renew the TLS … 1d ││                      ││                      ││                      │
+│   Staging box        ││                      ││                      ││                      │
 │                      ││                      ││                      ││                      │
-│  Chase the invoice   ││                      ││                      ││                      │
-│  Third follow-up     ││                      ││                      ││                      │
-│  ● 27/07/2026 ✗      ││                      ││                      ││                      │
+│   Chase the… late 3d ││                      ││                      ││                      │
+│   Third follow-up    ││                      ││                      ││                      │
+│                      ││                      ││                      ││                      │
+│                      ││                      ││                      ││                      │
+│                      ││                      ││                      ││                      │
 ╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯╰──────────────────────╯
-focus: item (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab switch · ? help · q quit
+
+hjkl Move  enter Open  a Add  s Subtask  e Edit  d Delete  m Grab  f Family  ctrl+t Focus
+tab Switch  ? Help  q Quit
 ```
 
 No mouse. No config file. No account.
@@ -44,19 +46,22 @@ No mouse. No config file. No account.
 
 ## Deadlines
 
-The only thing on the card that changes colour.
+Each card with a deadline ends its title row
+with a countdown, and it only gets louder as the day gets closer:
 
 | Time left | Colour | Looks like |
 |---|---|---|
-| more than 3 days | green | `● 09/08/2026` |
-| 3 days or less | amber | `● 03/08/2026` |
-| due today or tomorrow | red | `● 01/08/2026` |
-| the day has passed | red, with a cross | `● 27/07/2026 ✗` |
-| task is done | grey | `● 11/07/2026` |
+| more than 3 days | green | `9d` |
+| 3 days or less | amber, bold | `3d` |
+| due today or tomorrow | red, bold | `today`, `1d` |
+| the day has passed | red, bold | `late 3d` |
+| task is done | no countdown | |
 
-A finished task never turns red. Being late is history by then, not an alarm.
+The date itself, in DD/MM/YYYY, is in the detail view and on the Calendar
+page. A finished task never turns red: being late is history by then, not an
+alarm. The selected card, focused column and active tab are marked in blue.
 
-Deadlines are optional. Leave the field blank and the card is two lines instead of three.
+Deadlines are optional. Leave the field blank and the card has no countdown.
 
 ---
 
@@ -186,8 +191,10 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
 |---|---|
 | `enter` | expand the selected task in a centred popup — `e` edit, `d` delete, `esc` close |
 | `a` | add a task |
+| `s` | add a subtask under the selected task's family |
+| `f` | focus the board on the selected parent and its subtasks; press again to clear |
 | `e` | edit the selected task |
-| `d` | delete it, after a `y`/`n` confirm |
+| `d` | delete it, after a `y`/`n` confirm popup that names the task |
 | `m` | grab it, then `h`/`l` to drag between columns, `enter` to drop, `esc` to cancel |
 | `h` `l` | previous / next column |
 | `j` `k` | previous / next task |
@@ -198,16 +205,30 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
 | `?` | key list |
 | `q` | quit |
 
-`enter` on a card opens it centred on the screen, wrapped rather than
-truncated — the card in the column only has room for the first line of a
-description. It is read-only, but `e` and `d` work from there.
+`enter` on a card opens it centred on the screen: the full title, its
+parent, deadline, worktree and ID, then the subtask checklist and the
+description. Long bodies scroll with `j`/`k`; short ones stay compact. It is
+read-only, but `s`, `e` and `d` work from there.
 
-Adding and editing open the same three-field form, centred in the same place.
-`tab` and `shift+tab` move between Title, Description and Deadline. `enter`
-saves from any field, `esc` throws it away.
+Adding and editing open the same form, centred in the same place. `tab` and
+`shift+tab` move between Title, Description, Deadline, Worktree and Parent.
+Worktree is optional free text — the git worktree path or branch the work
+lives in — and a new subtask starts with its parent's.
+On Parent, type a title or ID to filter the visible dropdown, use `up`/`down`
+to highlight a match, and press `enter` to choose it. Clear the text for no
+parent. The dropdown shows titles and short IDs together, so nothing must be
+memorized. After choosing, `enter` saves; `esc` throws the form away.
 
 The Description is multi-line: `ctrl+j` starts a new line, and `enter` still
-saves. The box shows four lines at a time and scrolls past that.
+saves. The editor opens 15 rows tall, shrinking only when the terminal
+cannot fit it.
+
+Parent cards show a progress bar (`▰▱ 1/2 subtasks`). Subtasks keep their own
+column and deadline, show `↳ parent` on the card, and appear in the parent's
+detail checklist. Selecting any card marks the rest of its family with a dim
+bar, across columns. A parent cannot enter the terminal column until every
+subtask is complete. Deleting a parent safely detaches rather than deletes its
+subtasks.
 
 Dates go in as `DD/MM/YYYY`. A date it cannot read keeps the form open and tells you the format, rather than quietly dropping what you typed.
 
@@ -257,15 +278,22 @@ Coding agents can't drive the interactive board, so `gotodo` has headless comman
 
 ```bash
 gotodo init                                    # once per project (skip if .deadline/ exists)
+gotodo board                                   # board type + accepted columns
 gotodo add "Rewrite the parser" -desc "Split the lexer" -deadline 04/08/2026
+gotodo add "Write parser tests" -parent 3fa1c9e2
 gotodo list
 gotodo list -status blocked
+gotodo list -parent 3fa1c9e2
+gotodo show 3fa1c9e2                         # details, parent and subtasks
 gotodo move 3fa1c9e2 testing-review          # any unique id prefix works
+gotodo edit 3fa1c9e2 -parent 91bc2f0a         # attach; -parent "" detaches
+gotodo edit 3fa1c9e2 -worktree ../app-parser   # where the work lives; "" clears
+gotodo delete 3fa1c9e2                       # no confirm; list first, there is no undo
 ```
 
 The global `-file` flag must precede the subcommand (`gotodo -file ./work.json list`). A bare `gotodo -h`, or `init`, `add` or `list` with `-h`, prints help without changing anything.
 
-The installer drops a `deadline` skill (`skills/deadline/SKILL.md` in this repo) into the Claude, Codex, OpenCode and shared agent skills directories, so agents discover this workflow on their own. An open board picks up agent writes within a couple of seconds — no restart needed. The whole skill is ~200 words — it stays out of the way until needed.
+The installer drops a `gotodo-task-board` skill (`skills/gotodo-task-board/SKILL.md` in this repo) into the Claude, Codex, OpenCode and shared agent skills directories. Its task-management and kanban keywords make it easy for agents to discover for any coding workflow. An open board picks up agent writes within a couple of seconds — no restart needed.
 
 ---
 
@@ -277,7 +305,7 @@ go vet ./...
 gofmt -l .
 ```
 
-Three packages. `internal/task` is the model and the JSON store, `internal/stats` is pure analytics, `internal/ui` is the three Bubble Tea pages. Nothing in `internal/task` or `internal/stats` calls `time.Now` — the clock is always passed in, which is what makes the tests deterministic.
+Three packages. `internal/task` is the model and the JSON store, `internal/stats` is pure analytics, and `internal/ui` contains the four Bubble Tea tabs: Board, Analytics, Archive and Calendar. Nothing in `internal/task` or `internal/stats` calls `time.Now` — the clock is always passed in, which is what makes the tests deterministic.
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss). Three dependencies, no more.
 
@@ -295,7 +323,7 @@ Long enough that a finished task is still there when someone asks about it. Shor
 No. It is one file. Put it in a synced folder if you want it on two machines. Two sessions open at once merge by task instead of overwriting each other, with the later save winning any card both touched.
 
 **Why does it say my terminal is too narrow?**
-Four columns and a date need 80 columns (about 100 for a five-column project board). Below that it tells you, instead of drawing a board that overlaps itself. Analytics and Archive are single-column and stay readable at any width.
+Four columns and a date need 80 columns (about 100 for a five-column project board). Below that it tells you, instead of drawing a board that overlaps itself. Press `tab` for Analytics, Archive and Calendar, which stay readable on narrower terminals.
 
 **Do old task files still work?**
 Yes. Files written before descriptions and deadlines existed load fine, with those fields empty.

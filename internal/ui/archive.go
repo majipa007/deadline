@@ -12,8 +12,7 @@ import (
 	"gotodo/internal/task"
 )
 
-// ArchiveModel is the third page: finished tasks that have aged off the
-// board. It is view-only — nothing here mutates the board.
+// ArchiveModel is the read-only page of finished tasks aged off the board.
 type ArchiveModel struct {
 	board *task.Board
 	now   func() time.Time
@@ -31,8 +30,7 @@ func NewArchiveModel(b *task.Board) ArchiveModel {
 // SetSize records the terminal size for layout.
 func (m *ArchiveModel) SetSize(w, h int) { m.width, m.height = w, h }
 
-// Update handles selection movement. The archive is read-only, so no key
-// here changes any task.
+// Update moves the selection; no key here changes a task.
 func (m ArchiveModel) Update(msg tea.Msg) (ArchiveModel, tea.Cmd) {
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -58,15 +56,12 @@ func (m ArchiveModel) Update(msg tea.Msg) (ArchiveModel, tea.Cmd) {
 	return m, nil
 }
 
-// archiveChrome is how many of the page's rows are spent on the heading and
-// its blank line plus the blank line and footer at the bottom — the fixed
-// cost around the entry list that fitWindow's avail must exclude.
-const archiveChrome = 4
+// archiveChrome is the rows around the entry list: tab bar, heading and its
+// blank line, pageFrame's blank line and footer.
+const archiveChrome = 5
 
-// View renders the archive list. Like the board's columns, the list of
-// entries can be taller than the terminal, so it goes through the same
-// fitWindow used by BoardModel to pick a scrolling window that keeps the
-// selection visible and never grows past the terminal height.
+// View renders the archive list, windowed by fitWindow to keep the
+// selection visible within the terminal height.
 func (m ArchiveModel) View() string {
 	items := m.board.ArchivedTasks()
 	width := m.width
@@ -78,9 +73,10 @@ func (m ArchiveModel) View() string {
 		height = 24
 	}
 
-	head := TitleStyle.Render("ARCHIVE") +
+	head := TitleStyle.Render("Archive") +
 		MutedStyle.Render(" ("+strconv.Itoa(len(items))+")")
 
+	hints := append([]string{MutedStyle.Render("read-only"), keyHint("j/k", "Select")}, globalHints()...)
 	if len(items) == 0 {
 		lines := []string{head, "",
 			MutedStyle.Render("nothing archived yet"),
@@ -89,7 +85,7 @@ func (m ArchiveModel) View() string {
 				"finished tasks move here %d days after you complete them",
 				int(task.ArchiveAfter.Hours()/24)), width)),
 		}
-		return strings.Join(lines, "\n")
+		return pageFrame(m.width, m.height, strings.Join(lines, "\n"), hints...)
 	}
 
 	rendered := make([]string, len(items))
@@ -112,9 +108,7 @@ func (m ArchiveModel) View() string {
 	if more > 0 {
 		lines = append(lines, MutedStyle.Render(fmt.Sprintf("+%d more", more)))
 	}
-	lines = append(lines, "",
-		MutedStyle.Render(truncate("j/k move · tab switch · read-only", width)))
-	return strings.Join(lines, "\n")
+	return pageFrame(m.width, m.height, strings.Join(lines, "\n"), hints...)
 }
 
 func (m ArchiveModel) renderEntry(i int, t task.Task, width int) string {
@@ -128,16 +122,12 @@ func (m ArchiveModel) renderEntry(i int, t task.Task, width int) string {
 
 	body := strings.Join(rows, "\n")
 	if i == m.sel {
-		return lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, false, false, true).
-			BorderForeground(ColAccent).
-			PaddingLeft(1).Bold(true).Render(body)
+		return CardSelectedStyle.Render(body)
 	}
 	return CardStyle.Render(body)
 }
 
-// archivedOn falls back to UpdatedAt for entries archived by an older build
-// that did not stamp ArchivedAt.
+// archivedOn falls back to UpdatedAt for entries written without ArchivedAt.
 func archivedOn(t task.Task) time.Time {
 	if t.ArchivedAt != nil {
 		return *t.ArchivedAt
@@ -145,11 +135,8 @@ func archivedOn(t task.Task) time.Time {
 	return t.UpdatedAt
 }
 
-// metaLine renders the entry's bottom line — the deadline plus when it was
-// archived — and fits it inside inner columns rather than letting it
-// overflow. This page has no minimum-width guard, so at narrow widths it
-// drops the "· archived …" half first (the deadline is the more useful of
-// the two) and, if even the deadline alone does not fit, truncates that.
+// metaLine renders deadline and archive date within inner columns; when
+// narrow it drops the archive date first, then truncates the deadline.
 func (m ArchiveModel) metaLine(t task.Task, inner int) string {
 	archivedText := "archived " + FormatDate(archivedOn(t))
 	dl := RenderDeadline(t, m.now(), m.board.DoneStatus())
@@ -157,7 +144,7 @@ func (m ArchiveModel) metaLine(t task.Task, inner int) string {
 		return MutedStyle.Render(truncate(archivedText, inner))
 	}
 
-	full := dl + MutedStyle.Render("  ·  "+archivedText)
+	full := dl + MutedStyle.Render("   "+archivedText)
 	if lipgloss.Width(full) <= inner {
 		return full
 	}
@@ -165,8 +152,7 @@ func (m ArchiveModel) metaLine(t task.Task, inner int) string {
 		return dl
 	}
 
-	// Even the deadline alone doesn't fit at this width. Truncate its plain
-	// text and re-style, rather than slicing the ANSI-wrapped dl string.
+	// Truncate plain text and re-style; slicing the styled dl would cut ANSI codes.
 	u := task.DeadlineUrgency(t, m.now(), m.board.DoneStatus())
 	plain := "● " + FormatDate(*t.Deadline)
 	if u == task.UrgencyOverdue {

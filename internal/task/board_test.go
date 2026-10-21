@@ -94,6 +94,83 @@ func TestBoardDelete(t *testing.T) {
 	}
 }
 
+func TestBoardParentAndSubtaskLifecycle(t *testing.T) {
+	var b Board
+	parent := b.Add("Parent", "", nil, ref).ID
+	child, err := b.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ParentID != parent {
+		t.Fatalf("ParentID = %q, want %q", child.ParentID, parent)
+	}
+	if got := b.Children(parent); len(got) != 1 || got[0].ID != child.ID {
+		t.Fatalf("Children = %+v, want child", got)
+	}
+	if done, total := b.ChildProgress(parent); done != 0 || total != 1 {
+		t.Fatalf("progress = %d/%d, want 0/1", done, total)
+	}
+	if err := b.Move(parent, StatusDone, ref); err == nil {
+		t.Fatal("Move(parent to done) = nil with unfinished child")
+	}
+	if err := b.Move(child.ID, StatusDone, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Move(parent, StatusDone, ref); err != nil {
+		t.Fatalf("Move(parent after child) = %v", err)
+	}
+	if err := b.Edit(child.ID, "Renamed child", "detail", nil, ref); err != nil {
+		t.Fatalf("Edit child under completed parent = %v", err)
+	}
+	if err := b.Move(child.ID, StatusDoing, ref); err == nil {
+		t.Fatal("reopen child under completed parent = nil, want error")
+	}
+	if done, total := b.ChildProgress(parent); done != 1 || total != 1 {
+		t.Fatalf("progress = %d/%d, want 1/1", done, total)
+	}
+}
+
+func TestBoardRejectsInvalidHierarchy(t *testing.T) {
+	var b Board
+	parent := b.Add("Parent", "", nil, ref).ID
+	child, err := b.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.AddChild(child.ID, "Grandchild", "", nil, ref); err == nil {
+		t.Error("AddChild beneath child = nil, want error")
+	}
+	if err := b.EditWithParent(parent, child.ID, "Parent", "", nil, ref); err == nil {
+		t.Error("reparent task with children = nil, want error")
+	}
+	if err := b.EditWithParent(child.ID, child.ID, "Child", "", nil, ref); err == nil {
+		t.Error("self-parent edit = nil, want error")
+	}
+	if err := b.EditWithParent(child.ID, "", "Child", "", nil, ref); err != nil {
+		t.Fatalf("detach child = %v", err)
+	}
+	if b.Tasks[1].ParentID != "" {
+		t.Errorf("ParentID = %q after detach", b.Tasks[1].ParentID)
+	}
+}
+
+func TestBoardDeleteParentDetachesChildren(t *testing.T) {
+	var b Board
+	parent := b.Add("Parent", "", nil, ref).ID
+	child, err := b.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := child.ID
+	if err := b.Delete(parent); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := b.TaskByID(childID)
+	if !ok || got.ParentID != "" {
+		t.Fatalf("child after parent delete = %+v, found=%v", got, ok)
+	}
+}
+
 func TestBoardAddSetsDirty(t *testing.T) {
 	var b Board
 	if b.Dirty() {
@@ -108,7 +185,7 @@ func TestBoardAddSetsDirty(t *testing.T) {
 func TestBoardMoveToSameStatusDoesNotSetDirty(t *testing.T) {
 	var b Board
 	id := b.Add("[Task title]", "", nil, ref).ID
-	b.dirty = false // Add already set it; reset to isolate Move's effect
+	b.dirty = false // isolate Move's effect from Add's
 	if err := b.Move(id, StatusTodo, ref.Add(time.Hour)); err != nil {
 		t.Fatalf("Move returned %v, want nil", err)
 	}
@@ -278,5 +355,28 @@ func TestArchivedTasksNewestFirst(t *testing.T) {
 	}
 	if got[0].Title != "[Newer]" || got[1].Title != "[Older]" {
 		t.Errorf("order = [%s %s], want [[Newer] [Older]]", got[0].Title, got[1].Title)
+	}
+}
+
+func TestSetWorktreeTrimsClearsAndSkipsNoop(t *testing.T) {
+	b := &Board{}
+	now := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	id := b.Add("Task", "", nil, now).ID
+	if err := b.SetWorktree(id, "  ../wt  ", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.TaskByID(id); got.Worktree != "../wt" || !got.UpdatedAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("worktree = %q updated = %v", got.Worktree, got.UpdatedAt)
+	}
+	b.SetWorktree(id, "../wt", now.Add(2*time.Hour))
+	if got, _ := b.TaskByID(id); !got.UpdatedAt.Equal(now.Add(time.Hour)) {
+		t.Error("unchanged worktree bumped UpdatedAt")
+	}
+	b.SetWorktree(id, "", now)
+	if got, _ := b.TaskByID(id); got.Worktree != "" {
+		t.Errorf("blank did not clear, got %q", got.Worktree)
+	}
+	if err := b.SetWorktree("missing", "x", now); err == nil {
+		t.Error("unknown ID accepted")
 	}
 }

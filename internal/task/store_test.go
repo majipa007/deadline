@@ -69,8 +69,49 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-// Every mutation must survive Save + reload, on both column layouts: what
-// the board holds in memory is what the file must hold afterwards.
+func TestSaveLoadParentRelationship(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tasks.json")
+	b, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := b.Add("Parent", "", nil, ref).ID
+	child, err := b.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := child.ID
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := re.TaskByID(childID)
+	if !ok || got.ParentID != parent {
+		t.Fatalf("child = %+v, found=%v, want parent %s", got, ok, parent)
+	}
+}
+
+func TestLoadRejectsMalformedHierarchy(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing parent": `{"tasks":[{"id":"child","parent_id":"missing","title":"Child","status":"todo","created_at":"2026-07-30T12:00:00Z","updated_at":"2026-07-30T12:00:00Z"}]}`,
+		"nested child":   `{"tasks":[{"id":"root","title":"Root","status":"todo","created_at":"2026-07-30T12:00:00Z","updated_at":"2026-07-30T12:00:00Z"},{"id":"child","parent_id":"root","title":"Child","status":"todo","created_at":"2026-07-30T12:00:00Z","updated_at":"2026-07-30T12:00:00Z"},{"id":"grand","parent_id":"child","title":"Grand","status":"todo","created_at":"2026-07-30T12:00:00Z","updated_at":"2026-07-30T12:00:00Z"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "tasks.json")
+			if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(p); err == nil {
+				t.Fatal("Load = nil error, want malformed hierarchy error")
+			}
+		})
+	}
+}
+
+// Every mutation must survive Save + reload, on both column layouts.
 func TestSavePersistsNewTaskWithAllFields(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	b, err := Load(p)
@@ -305,8 +346,7 @@ func TestLoadCorruptFileErrors(t *testing.T) {
 	}
 }
 
-// Two sessions saving in turn must keep both sides' cards: the agent
-// logging while the TUI is open is the reason Save merges.
+// Two sessions saving in turn keep both sides' cards.
 func TestSaveMergesConcurrentAdds(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	tui, err := Load(p)
@@ -334,8 +374,179 @@ func TestSaveMergesConcurrentAdds(t *testing.T) {
 	}
 }
 
-// A delete must stay deleted: Save merges concurrent adds from disk, but a
-// task removed this session is a tombstone, never merged back.
+func TestSaveMergesConcurrentSubtask(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "board.json")
+	b, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := b.Add("Parent", "", nil, ref).ID
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ui, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.AddChild(parent, "Child", "", nil, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ui.Edit(parent, "Renamed parent", "", nil, ref); err != nil {
+		t.Fatal(err)
+	}
+	if err := ui.Save(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if children := re.Children(parent); len(children) != 1 || children[0].Title != "Child" {
+		t.Fatalf("children = %+v, want concurrent child preserved", children)
+	}
+}
+
+func TestSaveDetachesChildConcurrentlyAddedToDeletedParent(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "board.json")
+	b, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := b.Add("Parent", "", nil, ref).ID
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	deleter, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adder, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleter.Delete(parent); err != nil {
+		t.Fatal(err)
+	}
+	child, err := adder.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := child.ID
+	if err := adder.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleter.Save(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := re.TaskByID(parent); ok {
+		t.Fatal("deleted parent was resurrected")
+	}
+	got, ok := re.TaskByID(childID)
+	if !ok || got.ParentID != "" {
+		t.Fatalf("child = %+v, found=%v; want detached root", got, ok)
+	}
+}
+
+func TestSaveDoesNotResurrectParentDeletedBeforeStaleChildSave(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "board.json")
+	b, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := b.Add("Parent", "", nil, ref).ID
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	deleter, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := stale.AddChild(parent, "Child", "", nil, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := child.ID
+	if err := deleter.Delete(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleter.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stale.Save(); err != nil {
+		t.Fatal(err)
+	}
+	re, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := re.TaskByID(parent); ok {
+		t.Fatal("stale writer resurrected deleted parent")
+	}
+	got, ok := re.TaskByID(childID)
+	if !ok || got.ParentID != "" {
+		t.Fatalf("child = %+v, found=%v; want detached root", got, ok)
+	}
+}
+
+func TestSaveRejectsConcurrentCompletionAndSubtaskCreation(t *testing.T) {
+	for _, completionFirst := range []bool{false, true} {
+		name := "subtask-first"
+		if completionFirst {
+			name = "completion-first"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "board.json")
+			b, err := Load(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parent := b.Add("Parent", "", nil, ref).ID
+			if err := b.Save(); err != nil {
+				t.Fatal(err)
+			}
+			completer, _ := Load(p)
+			adder, _ := Load(p)
+			if err := completer.Move(parent, StatusDone, ref); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := adder.AddChild(parent, "Child", "", nil, ref); err != nil {
+				t.Fatal(err)
+			}
+			if completionFirst {
+				if err := completer.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := adder.Save(); err == nil {
+					t.Fatal("subtask save = nil, want completion conflict")
+				}
+			} else {
+				if err := adder.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := completer.Save(); err == nil {
+					t.Fatal("completion save = nil, want subtask conflict")
+				}
+			}
+		})
+	}
+}
+
+// A task deleted this session is not merged back from disk.
 func TestSaveDoesNotResurrectDeletes(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	b, err := Load(p)
@@ -370,8 +581,7 @@ func TestSaveDoesNotResurrectDeletes(t *testing.T) {
 	}
 }
 
-// Deletes hold while concurrent adds still merge: the tombstone only skips
-// the removed ID, everything else on disk is appended as before.
+// Deletes hold while concurrent adds still merge.
 func TestSaveMergesAddsAroundDeletes(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	b, err := Load(p)
@@ -416,8 +626,7 @@ func TestSaveMergesAddsAroundDeletes(t *testing.T) {
 	_ = keep
 }
 
-// On the same task the later save wins whole: merging is per task, not
-// per field, so concurrent edits of one card resolve last-writer-wins.
+// Merging is per task, not per field: the later save of a card wins whole.
 func TestSaveSessionEditsWinOverDisk(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	first, err := Load(p)
@@ -457,8 +666,7 @@ func TestSaveSessionEditsWinOverDisk(t *testing.T) {
 	}
 }
 
-// A clean board with nothing new on disk writes nothing: read-only
-// sessions stay read-only even with the merge step in Save.
+// A clean board with nothing new on disk writes nothing.
 func TestSaveCleanBoardWritesNothing(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "board.json")
 	b, err := Load(p)

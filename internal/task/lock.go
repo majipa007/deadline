@@ -10,31 +10,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// lockAttempts and lockDelay bound how long a writer waits for a competing
-// session: about two seconds total. Brief headless writes never hold it
-// longer than milliseconds; a stuck holder fails the waiter with a retry
-// message instead of hanging an agent forever.
+// lockAttempts and lockDelay cap the wait for a competing writer at ~2s, so a
+// stuck holder fails with a retry message instead of hanging.
 const (
 	lockAttempts = 40
 	lockDelay    = 50 * time.Millisecond
 )
 
-// BoardLock is an advisory exclusive lock on one board file, so two agents
-// (or an agent plus an open TUI) cannot load-modify-save over each other
-// and silently drop tasks. Reads take no lock: Save's atomic rename means
-// readers never see a half-written board. One empty file per board lives in
-// the temp dir; the OS reclaims it with the rest of tmp. Best-effort on
-// filesystems without flock (e.g. some NFS mounts), where writers fall
-// back to the old last-writer-wins behaviour.
+// BoardLock is an advisory exclusive lock on one board file, so concurrent
+// writers cannot load-modify-save over each other. Reads take no lock (Save
+// renames atomically). Best-effort on filesystems without flock.
 type BoardLock struct {
 	f *os.File
 }
 
-// LockBoard takes the lock for boardPath, via a lock file in the system
-// temp dir keyed by the board's absolute path — never beside the board
-// itself, so it litters neither projects nor config dirs, and needs no
-// gitignore. Hold it across the whole load-modify-save and Close it
-// afterwards.
+// LockBoard takes the lock for boardPath via a lock file in the temp dir
+// keyed by its absolute path. Hold it across load-modify-save, then Close.
 func LockBoard(boardPath string) (*BoardLock, error) {
 	abs, err := filepath.Abs(boardPath)
 	if err != nil {

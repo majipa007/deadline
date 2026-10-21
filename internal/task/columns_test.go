@@ -37,9 +37,8 @@ func TestBoardStatusesDefaultsToPersonal(t *testing.T) {
 func TestLoadMigratesReviewAndTesting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "board.json")
-	// A six-column file from before review/testing merged: both the task
-	// status and its transition history must move to testing-review, with
-	// IDs, timestamps and order untouched.
+	// Legacy six-column file: status and history move to testing-review,
+	// everything else untouched.
 	data := `{"columns": ["todo", "indev", "review", "testing", "blocked", "shipped"],` +
 		`"tasks": [` +
 		`{"id": "a", "title": "r", "status": "review",` +
@@ -82,8 +81,7 @@ func TestLoadMigratesReviewAndTesting(t *testing.T) {
 			t.Errorf("task %q history = %+v, want [{from %q to %q}]", want.id, found.History, want.from, want.to)
 		}
 	}
-	// Completion still resolves through the migrated history: the
-	// testing-review task is not complete while shipped is the terminal.
+	// A testing-review task is not complete on a shipped-terminal board.
 	if _, ok := CompletedAt(b.Tasks[0], b.DoneStatus()); ok {
 		t.Error("unshipped task reports a completion, want false")
 	}

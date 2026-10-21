@@ -8,11 +8,16 @@
 //
 //	gotodo init                                              # one dev board in ./.deadline/
 //	gotodo add "Rewrite the parser" -desc "..." -deadline 04/08/2026
+//	gotodo add "Write parser tests" -parent 3fa1c9e2
+//	gotodo board                                             # board type + accepted columns
 //	gotodo list
 //	gotodo list -status blocked
-//
-// gotodo move 3fa1c9e2 testing-review
-// gotodo version
+//	gotodo show 3fa1c9e2
+//	gotodo move 3fa1c9e2 testing-review
+//	gotodo edit 3fa1c9e2 -desc "Ready for review"
+//	gotodo edit 3fa1c9e2 -worktree ../deadline-parser
+//	gotodo delete 3fa1c9e2
+//	gotodo version
 //
 // The global -file flag, when given, must precede the subcommand.
 package main
@@ -35,26 +40,26 @@ import (
 // dateLayout is the only accepted deadline shape, shared with the TUI form.
 const dateLayout = "02/01/2006"
 
-// shortLen is how much of a task ID headless output prints: enough to
-// move the task again, since move accepts a unique prefix.
+// shortLen is how much of a task ID headless output prints; commands accept
+// a unique prefix.
 const shortLen = 8
 
-// projectDirName is the per-project board directory, kept gitignorable by
-// design: one project never sees another project's board.
+// projectDirName is the per-project board directory.
 const projectDirName = ".deadline"
 
 // projectBoardFile is the board file inside a project directory.
 const projectBoardFile = "board.json"
 
 // addUsage is printed for `add -h` and malformed add invocations.
-const addUsage = `usage: gotodo add "title" [-desc ...] [-deadline DD/MM/YYYY] [-status ...]`
+const addUsage = `usage: gotodo add "title" [-desc ...] [-deadline DD/MM/YYYY] [-status ...] [-parent ID] [-worktree PATH]`
 
-// version is the built revision, stamped at build time:
+const editUsage = `usage: gotodo edit <id> [-title ...] [-desc ...] [-deadline DD/MM/YYYY] [-parent ID] [-worktree PATH]`
+
+// version is the built revision, stamped via
 //
 //	go build -ldflags "-X main.version=<commit sha>"
 //
-// Unstamped (e.g. local `go build`) reports "dev". The installer compares
-// this against the cloned HEAD to skip rebuilds when already current.
+// Unstamped builds report "dev". install.sh compares it to HEAD to skip rebuilds.
 var version = "dev"
 
 func main() {
@@ -67,8 +72,7 @@ func main() {
 func run(argv []string) error {
 	fs := flag.NewFlagSet("gotodo", flag.ContinueOnError)
 	file := fs.String("file", "", "path to the tasks JSON file (default: project board, else personal board)")
-	// The flag package stops at the first non-flag argument, which is the
-	// subcommand; each subcommand parses its own flags from what remains.
+	// Parsing stops at the subcommand; each subcommand parses its own flags.
 	if err := fs.Parse(argv); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -77,8 +81,7 @@ func run(argv []string) error {
 	}
 	args := fs.Args()
 
-	// init targets ./.deadline unconditionally and runs before any board
-	// resolution, so it works even where no board exists yet.
+	// init runs before board resolution so it works where no board exists.
 	if len(args) > 0 && args[0] == "init" {
 		return runInit(args[1:])
 	}
@@ -100,20 +103,55 @@ func run(argv []string) error {
 		return runAdd(path, args[1:])
 	case "list":
 		return runList(path, args[1:])
+	case "show":
+		return runShow(path, args[1:])
+	case "board":
+		return runBoard(path, args[1:])
 	case "move":
 		return runMove(path, args[1:])
+	case "edit":
+		return runEdit(path, args[1:])
+	case "delete":
+		return runDelete(path, args[1:])
 	case "version":
 		fmt.Println(version)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (want init, add, list, move or version)", args[0])
+		return fmt.Errorf("unknown command %q (want init, board, add, list, show, move, edit, delete or version)", args[0])
 	}
 }
 
-// resolveBoardPath finds the board for this invocation: the nearest
-// .deadline/board.json walking up from the working directory, so every
-// initialised project gets its own board; outside any project it is the
-// global personal board.
+// runBoard reports the resolved board type and status pipeline. It does not
+// print the JSON path: agents should use the CLI, not the storage file.
+func runBoard(path string, args []string) error {
+	fs := flag.NewFlagSet("board", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q (usage: gotodo board)", fs.Arg(0))
+	}
+	b, err := task.Load(path)
+	if err != nil {
+		return err
+	}
+	names := make([]string, 0, len(b.Statuses()))
+	for _, s := range b.Statuses() {
+		names = append(names, string(s))
+	}
+	kind := "personal"
+	if b.DoneStatus() == task.StatusShipped {
+		kind = "development"
+	}
+	fmt.Printf("board: %s\ncolumns: %s\n", kind, strings.Join(names, ", "))
+	return nil
+}
+
+// resolveBoardPath returns the nearest project board walking up from the
+// working directory, else the global personal board.
 func resolveBoardPath() (string, error) {
 	if board, err := findProjectBoard(); err != nil {
 		return "", err
@@ -123,10 +161,8 @@ func resolveBoardPath() (string, error) {
 	return task.DefaultPath()
 }
 
-// findProjectBoard walks up from the working directory to the nearest
-// ancestor containing a .deadline/board.json file, or "" when there is
-// none. Empty .deadline directories are skipped past: only a real board
-// file claims the project.
+// findProjectBoard returns the nearest ancestor's .deadline/board.json, or
+// "". A .deadline directory without a board file does not count.
 func findProjectBoard() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -150,11 +186,8 @@ func findProjectBoard() (string, error) {
 	}
 }
 
-// runInit creates ./.deadline/board.json with the dev columns. One project,
-// one board: if this directory is already inside an initialised project,
-// that board is reused instead of nesting a new one. (A nested board is
-// still possible by hand-creating .deadline/board.json; the nearest file
-// always wins.) It keeps the board out of version control via .gitignore.
+// runInit creates ./.deadline/board.json with the dev columns and gitignores
+// it. Inside an existing project it reuses that board instead of nesting.
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
@@ -194,9 +227,8 @@ func runInit(args []string) error {
 	return nil
 }
 
-// ensureGitignored keeps the project board out of version control: it
-// appends .deadline/ to the project's .gitignore, creating the file when
-// the project has none yet.
+// ensureGitignored appends .deadline/ to the project's .gitignore, creating
+// it if needed.
 func ensureGitignored(dir string) {
 	ignore := filepath.Join(dir, ".gitignore")
 	data, err := os.ReadFile(ignore)
@@ -223,25 +255,20 @@ func ensureGitignored(dir string) {
 	fmt.Println("added .deadline/ to .gitignore")
 }
 
-// runTUI is the interactive board: tidy, run, and save on change. Saves
-// merge whatever agents wrote while the board was open.
+// runTUI sweeps the archive, runs the interactive board, and saves on exit.
 func runTUI(path string) error {
 	board, err := task.Load(path)
 	if err != nil {
 		return err
 	}
 
-	// Tidy the board before the first frame: anything in the terminal
-	// column for two weeks belongs in the archive, not on the board.
 	board.SweepArchive(time.Now())
 
 	p := tea.NewProgram(ui.NewApp(board), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return err
 	}
-	// Final save covers any state the dirty path missed. Skipped when the
-	// board isn't dirty so a read-only session can't clobber another
-	// instance's save with a stale snapshot.
+	// Only save when dirty so a read-only session never writes.
 	if board.Dirty() {
 		if err := board.Save(); err != nil {
 			return fmt.Errorf("save failed: %w", err)
@@ -250,9 +277,8 @@ func runTUI(path string) error {
 	return nil
 }
 
-// runAdd appends one task headless: add "title" [-desc ...]
-// [-deadline DD/MM/YYYY] [-status ...]. The title comes first so the common
-// case reads naturally; the rest parses as flags.
+// runAdd appends one task headless. The title comes first; the rest parses
+// as flags.
 func runAdd(path string, args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Println(addUsage)
@@ -265,6 +291,8 @@ func runAdd(path string, args []string) error {
 	desc := fs.String("desc", "", "task description")
 	deadlineStr := fs.String("deadline", "", "deadline as DD/MM/YYYY")
 	statusStr := fs.String("status", "", "starting column")
+	parentStr := fs.String("parent", "", "parent task ID prefix")
+	worktree := fs.String("worktree", "", "git worktree path or branch for this task")
 	if err := fs.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -284,15 +312,9 @@ func runAdd(path string, args []string) error {
 	if title == "" {
 		return errors.New("title must not be blank")
 	}
-	var deadline *time.Time
-	if *deadlineStr != "" {
-		// Local midnight, like the TUI form: UTC midnight would shift the
-		// date for timezones west of Greenwich.
-		d, err := time.ParseInLocation(dateLayout, *deadlineStr, time.Local)
-		if err != nil {
-			return fmt.Errorf("bad deadline %q (want DD/MM/YYYY)", *deadlineStr)
-		}
-		deadline = &d
+	deadline, err := parseHeadlessDeadline(*deadlineStr)
+	if err != nil {
+		return err
 	}
 	status := board.Statuses()[0]
 	if *statusStr != "" {
@@ -302,26 +324,59 @@ func runAdd(path string, args []string) error {
 		}
 		status = s
 	}
+	parentID := ""
+	if *parentStr != "" {
+		parent, err := resolveID(board, *parentStr)
+		if err != nil {
+			return fmt.Errorf("parent: %w", err)
+		}
+		parentID = parent.ID
+	}
 	now := time.Now()
-	t := board.Add(title, *desc, deadline, now)
+	var t *task.Task
+	if parentID == "" {
+		t = board.Add(title, *desc, deadline, now)
+	} else {
+		t, err = board.AddChild(parentID, title, *desc, deadline, now)
+		if err != nil {
+			return err
+		}
+	}
+	id, addedTitle := t.ID, t.Title
+	if err := board.SetWorktree(id, *worktree, now); err != nil {
+		return err
+	}
 	if status != board.Statuses()[0] {
-		if err := board.Move(t.ID, status, now); err != nil {
+		if err := board.Move(id, status, now); err != nil {
 			return err
 		}
 	}
 	if err := board.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("added %s [%s] %s\n", shortID(t.ID), status, t.Title)
+	fmt.Printf("added %s [%s] %s\n", shortID(id), status, addedTitle)
 	return nil
 }
 
-// runList prints one line per task: id, column, title, deadline when set.
-// Archived tasks stay hidden, same as on the board. Read-only: the sweep
-// below applies in memory only and is never saved.
+// parseHeadlessDeadline parses a DD/MM/YYYY flag at local midnight (like the
+// TUI). Blank means no deadline, which edit uses to clear one.
+func parseHeadlessDeadline(value string) (*time.Time, error) {
+	if value == "" {
+		return nil, nil
+	}
+	d, err := time.ParseInLocation(dateLayout, value, time.Local)
+	if err != nil {
+		return nil, fmt.Errorf("bad deadline %q (want DD/MM/YYYY)", value)
+	}
+	return &d, nil
+}
+
+// runList prints one line per active task. Read-only: the archive sweep is
+// applied in memory and never saved.
 func runList(path string, args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	statusStr := fs.String("status", "", "only show one column")
+	parentStr := fs.String("parent", "", "only show children of one task")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -345,15 +400,36 @@ func runList(path string, args []string) error {
 		}
 		filter = s
 	}
+	parentID := ""
+	if *parentStr != "" {
+		parent, err := resolveID(board, *parentStr)
+		if err != nil {
+			return fmt.Errorf("parent: %w", err)
+		}
+		parentID = parent.ID
+	}
 	printed := 0
 	for _, s := range board.Statuses() {
 		if filter != "" && s != filter {
 			continue
 		}
 		for _, t := range board.ByStatus(s) {
+			if parentID != "" && t.ParentID != parentID {
+				continue
+			}
 			line := fmt.Sprintf("%s [%s] %s", shortID(t.ID), s, t.Title)
 			if t.Deadline != nil {
 				line += " · due " + t.Deadline.In(now.Location()).Format(dateLayout)
+			}
+			if t.ParentID != "" {
+				if parent, ok := board.TaskByID(t.ParentID); ok {
+					line += " · parent " + shortID(parent.ID) + " " + parent.Title
+				}
+			} else if done, total := board.ChildProgress(t.ID); total > 0 {
+				line += fmt.Sprintf(" · subtasks %d/%d", done, total)
+			}
+			if t.Worktree != "" {
+				line += " · worktree " + t.Worktree
 			}
 			fmt.Println(line)
 			printed++
@@ -365,9 +441,55 @@ func runList(path string, args []string) error {
 	return nil
 }
 
-// runMove slides one task to another column: move <id-prefix> <status>.
-// The ID may be abbreviated as long as it still matches exactly one active
-// task.
+// runShow prints one task with its relationship context and direct subtasks.
+func runShow(path string, args []string) error {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Println("usage: gotodo show <id>")
+		return nil
+	}
+	if len(args) != 1 {
+		return errors.New("usage: gotodo show <id>")
+	}
+	board, err := task.Load(path)
+	if err != nil {
+		return err
+	}
+	board.SweepArchive(time.Now())
+	t, err := resolveID(board, args[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s [%s] %s\n", shortID(t.ID), t.Status, t.Title)
+	if t.ParentID != "" {
+		if parent, ok := board.TaskByID(t.ParentID); ok {
+			fmt.Printf("parent: %s [%s] %s\n", shortID(parent.ID), parent.Status, parent.Title)
+		}
+	}
+	if t.Deadline != nil {
+		fmt.Printf("deadline: %s\n", t.Deadline.In(time.Local).Format(dateLayout))
+	}
+	if t.Worktree != "" {
+		fmt.Printf("worktree: %s\n", t.Worktree)
+	}
+	if t.Description != "" {
+		fmt.Printf("description:\n%s\n", t.Description)
+	}
+	children := board.Children(t.ID)
+	if len(children) > 0 {
+		done, total := board.ChildProgress(t.ID)
+		fmt.Printf("subtasks: %d/%d complete\n", done, total)
+		for _, child := range children {
+			archived := ""
+			if child.Archived {
+				archived = " archived"
+			}
+			fmt.Printf("  %s [%s%s] %s\n", shortID(child.ID), child.Status, archived, child.Title)
+		}
+	}
+	return nil
+}
+
+// runMove moves one task to another column: move <id-prefix> <status>.
 func runMove(path string, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: gotodo move <id> <status>")
@@ -405,11 +527,123 @@ func runMove(path string, args []string) error {
 	return nil
 }
 
-// resolveID finds the one active task whose ID starts with arg. Archived
-// tasks are reported rather than silently moved while invisible.
+// runEdit changes the supplied task fields headless; omitted flags keep their
+// values, and an empty -desc, -deadline or -worktree clears it. Status
+// changes go through move.
+func runEdit(path string, args []string) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		fmt.Println(editUsage)
+		return nil
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("bad task id %q (%s)", args[0], editUsage)
+	}
+	fs := flag.NewFlagSet("edit", flag.ContinueOnError)
+	titleFlag := fs.String("title", "", "replacement title")
+	descFlag := fs.String("desc", "", "replacement description (blank clears)")
+	deadlineFlag := fs.String("deadline", "", "replacement deadline as DD/MM/YYYY (blank clears)")
+	parentFlag := fs.String("parent", "", "replacement parent ID prefix (blank detaches)")
+	worktreeFlag := fs.String("worktree", "", "replacement worktree path or branch (blank clears)")
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q (%s)", fs.Arg(0), editUsage)
+	}
+	set := make(map[string]bool, 3)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if len(set) == 0 {
+		return errors.New(editUsage)
+	}
+
+	board, err := task.Load(path)
+	if err != nil {
+		return err
+	}
+	board.SweepArchive(time.Now())
+	t, err := resolveID(board, args[0])
+	if err != nil {
+		return err
+	}
+	title, desc, deadline := t.Title, t.Description, t.Deadline
+	parentID := t.ParentID
+	if set["title"] {
+		title = *titleFlag
+	}
+	if set["desc"] {
+		desc = *descFlag
+	}
+	if set["deadline"] {
+		deadline, err = parseHeadlessDeadline(*deadlineFlag)
+		if err != nil {
+			return err
+		}
+	}
+	if set["parent"] {
+		parentID = ""
+		if *parentFlag != "" {
+			parent, err := resolveID(board, *parentFlag)
+			if err != nil {
+				return fmt.Errorf("parent: %w", err)
+			}
+			parentID = parent.ID
+		}
+	}
+	now := time.Now()
+	if err := board.EditWithParent(t.ID, parentID, title, desc, deadline, now); err != nil {
+		return err
+	}
+	if set["worktree"] {
+		if err := board.SetWorktree(t.ID, *worktreeFlag, now); err != nil {
+			return err
+		}
+	}
+	if err := board.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("edited %s [%s] %s\n", shortID(t.ID), t.Status, strings.TrimSpace(title))
+	return nil
+}
+
+// runDelete removes one active task headless: delete <id-prefix>. There is
+// no confirm step; the printed receipt names what was removed.
+func runDelete(path string, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: gotodo delete <id>")
+	}
+	board, err := task.Load(path)
+	if err != nil {
+		return err
+	}
+	board.SweepArchive(time.Now())
+
+	t, err := resolveID(board, args[0])
+	if err != nil {
+		return err
+	}
+	detached := len(board.Children(t.ID))
+	if err := board.Delete(t.ID); err != nil {
+		return err
+	}
+	if err := board.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("deleted %s [%s] %s", shortID(t.ID), t.Status, t.Title)
+	if detached > 0 {
+		fmt.Printf(" · detached %d subtasks", detached)
+	}
+	fmt.Println()
+	return nil
+}
+
+// resolveID finds the one active task whose ID starts with arg; a match on
+// an archived task is reported as an error.
 func resolveID(b *task.Board, arg string) (task.Task, error) {
 	if arg == "" {
-		return task.Task{}, errors.New("usage: gotodo move <id> <status>")
+		return task.Task{}, errors.New("task id must not be blank")
 	}
 	var active, archived []task.Task
 	for _, t := range b.Tasks {

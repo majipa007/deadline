@@ -9,14 +9,12 @@ import (
 	"gotodo/internal/task"
 )
 
-// chartRef is this file's fixed clock. board_test.go owns the package-level
-// `ref`; this name avoids colliding with it.
+// chartRef is this file's fixed clock (board_test.go already declares ref).
 var chartRef = time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// stripANSI removes lipgloss's colour escapes so assertions can match the
-// visible text.
+// stripANSI removes colour escapes so assertions match visible text.
 func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
 func TestSparklineScalesToMax(t *testing.T) {
@@ -118,15 +116,8 @@ func TestRenderDeadlineMarksOverdue(t *testing.T) {
 	}
 }
 
-// TestRenderDeadlineDateAgreesWithUrgencyAcrossTimezones pins RenderDeadline
-// and task.DeadlineUrgency to the same calendar day. A deadline stored with
-// a +08:00 offset, viewed from a negative-offset zone, used to format in the
-// stored zone while urgency was computed in now's zone: two different
-// calendar days from one deadline. Concretely, a deadline saved as
-// 2026-08-09T00:00:00+08:00 and viewed from America/Los_Angeles on 09/08
-// rendered "09/08/2026" (the SGT calendar day) while urgency computed -1
-// day and marked it overdue — the card looked wrong on the very day it was
-// due.
+// RenderDeadline and DeadlineUrgency agree on the calendar day when the
+// deadline's stored zone differs from now's.
 func TestRenderDeadlineDateAgreesWithUrgencyAcrossTimezones(t *testing.T) {
 	sgt, err := time.LoadLocation("Asia/Singapore")
 	if err != nil {
@@ -141,10 +132,8 @@ func TestRenderDeadlineDateAgreesWithUrgencyAcrossTimezones(t *testing.T) {
 	now := time.Date(2026, 8, 9, 7, 0, 0, 0, la)  // viewed from a negative-offset zone
 	tk := task.Task{Status: task.StatusTodo, Deadline: &due}
 
-	// The date the urgency calculation actually used, and whether it landed
-	// on "overdue" — derived independently rather than hard-coded, so the
-	// test states the invariant (render and urgency agree) rather than one
-	// timezone library's specific offset arithmetic.
+	// Derived rather than hard-coded: the invariant is agreement, not one
+	// specific offset result.
 	wantDate := FormatDate(due.In(now.Location()))
 	wantOverdue := task.DeadlineUrgency(tk, now, task.StatusDone) == task.UrgencyOverdue
 

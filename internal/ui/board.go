@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,8 @@ const (
 	fieldTitle = iota
 	fieldDesc
 	fieldDeadline
+	fieldWorktree
+	fieldParent
 	fieldCount
 )
 
@@ -52,12 +55,22 @@ type BoardModel struct {
 	title    textinput.Model
 	desc     textarea.Model // multi-line: ctrl+j inserts a newline, enter saves
 	deadline textinput.Model
-	field    int        // which of the three fields has focus
+	worktree textinput.Model
+	parent   textinput.Model
+	field    int        // which form field has focus
 	picker   datePicker // the deadline calendar, when open
+	// The parent field filters eligible roots; formParentID is set only once
+	// Enter confirms the highlighted option.
+	formParentID   string
+	parentIndex    int
+	parentChoosing bool
 
 	editID   string      // set while editing an existing task
 	grabID   string      // set while in modeMove
 	grabFrom task.Status // original column of the grabbed task
+
+	detailScroll int    // detail popup body offset in wrapped rows
+	familyID     string // root task shown by the optional family filter
 
 	now func() time.Time // injectable clock; tests pin it
 
@@ -80,16 +93,17 @@ func NewBoardModel(b *task.Board) BoardModel {
 		return in
 	}
 	m.title = line("task title", 200)
-	m.deadline = line("DD/MM/YYYY (optional)", 10)
+	m.deadline = line("DD/MM/YYYY", 10)
+	m.worktree = line("path or branch (optional)", 500)
+	m.parent = line("type a task title or ID (optional)", 200)
 
 	m.desc = textarea.New()
-	m.desc.Placeholder = "description (optional) · ctrl+j for a new line"
-	m.desc.CharLimit = 500
-	m.desc.Prompt = "› "
+	m.desc.Placeholder = "Write details, context, or Markdown…"
+	m.desc.CharLimit = 10000
+	// The field label already marks focus; a plain gutter beats a per-row arrow.
+	m.desc.Prompt = "  "
 	m.desc.ShowLineNumbers = false
-	// Enter must reach updateInput to save the task, so the newline moves to
-	// ctrl+j. Terminals send 0x0A for ctrl+j and 0x0D for enter, so the two
-	// stay distinguishable.
+	// Enter saves the task, so newline moves to ctrl+j (0x0A vs enter's 0x0D).
 	m.desc.KeyMap.InsertNewline.SetKeys("ctrl+j")
 	m.sizeForm()
 	return m
@@ -102,18 +116,15 @@ func (m *BoardModel) SetSize(w, h int) {
 }
 
 const (
-	// popupMaxWidth caps the centred detail/form panel: past this a line of
-	// description is too long to read comfortably.
-	popupMaxWidth = 64
-	// labelWidth is the form's left gutter, wide enough for "Description".
-	labelWidth = 12
-	// descRows is how many rows of the description are visible at once; the
-	// textarea scrolls past that.
-	descRows = 4
+	// popupMaxWidth caps the centred panels at a comfortable line length.
+	popupMaxWidth = 72
+	// The description editor is bounded so the other fields stay visible.
+	descDefaultRows = 15
+	descMaxRows     = 15
+	descMinRows     = 3
 )
 
-// popupWidth is the content width of the centred panels, leaving a margin so
-// the popup reads as floating over the board rather than filling the screen.
+// popupWidth is the content width of the centred panels, with a side margin.
 func (m BoardModel) popupWidth() int {
 	w := m.width
 	if w <= 0 {
@@ -129,44 +140,58 @@ func (m BoardModel) popupWidth() int {
 	return w
 }
 
-// sizeForm fits the three fields inside the popup, so a long value scrolls
-// inside its own box instead of stretching the panel past the terminal.
+// sizeForm fits the fields inside the popup so long values scroll in place.
 func (m *BoardModel) sizeForm() {
-	inner := m.popupWidth() - labelWidth - 2 // 2 for the panel's own padding
+	inner := m.popupWidth() - 2 // panel's one-column padding on each side
 	if inner < 10 {
 		inner = 10
 	}
-	m.title.Width = inner - 2 // textinput.Width excludes its "› " prompt
-	m.deadline.Width = inner - 2
+	// textinput draws "› " plus Width+1 cells (a cursor cell), so each input
+	// gets its column minus 3 or it wraps onto a ghost blank row.
+	dl, wt := formDateWidths(inner)
+	m.title.Width = inner - 3
+	m.deadline.Width = dl - 3
+	m.worktree.Width = wt - 3
+	m.parent.Width = inner - 3
 	m.desc.SetWidth(inner)
 	rows, _ := m.formRows()
 	m.desc.SetHeight(rows)
 }
 
-// formRows splits the terminal's height between the popup's fixed furniture,
-// the calendar, and the description box: rows is how tall the description box
-// may be, calendar whether the calendar still fits. Nothing else in the form
-// can shrink, so on a terminal too short for both the calendar is what gives
-// — the date can still be typed. Callers must re-run this (via sizeForm)
-// whenever the height or the picker changes.
+// formRows returns the description box height and whether the calendar fits.
+// On a short terminal the calendar is dropped first (the date can still be
+// typed). Re-run via sizeForm whenever the height or picker changes.
 func (m BoardModel) formRows() (rows int, calendar bool) {
-	rows, calendar = descRows, m.picker.open
+	rows, calendar = descDefaultRows, m.picker.open
 	if m.height <= 0 {
 		return rows, calendar
 	}
-	fixed := 8 // 2 page rows + 2 border + heading + title + deadline + hint
+	// Content budget: one AppModel tab row and the panel's two border rows.
+	budget := m.height - 3
+	fixed := 11 + m.formGaps()
+	if m.compactParentForm() {
+		fixed = 10 + m.formGaps()
+	}
+	if m.field == fieldParent {
+		fixed += m.parentDropdownHeight()
+	}
+	fixed += len(m.formRelationships(m.popupWidth() - 2))
 	if m.err != "" {
 		fixed++
 	}
 	cal := 0
 	if calendar {
-		cal = lipgloss.Height(m.picker.View(m.now())) + 3 // 2 blank rows + its hint
+		cal = lipgloss.Height(m.picker.View(m.now())) + 2 // blank row + hint
 	}
-	if m.height-fixed-cal < 1 {
+	if m.compactParentForm() {
+		return 1, false
+	}
+	if budget-fixed-cal < descMinRows {
 		calendar, cal = false, 0
 	}
-	if spare := m.height - fixed - cal; spare < rows {
-		rows = spare
+	rows = budget - fixed - cal
+	if rows > descMaxRows {
+		rows = descMaxRows
 	}
 	if rows < 1 {
 		rows = 1
@@ -191,9 +216,25 @@ func (m BoardModel) overlay(panel string) string {
 
 func (m BoardModel) currentStatus() task.Status { return m.board.Statuses()[m.col] }
 
+// visibleByStatus applies the optional family filter without changing the
+// board's domain ordering or hiding tasks from other pages.
+func (m BoardModel) visibleByStatus(s task.Status) []task.Task {
+	items := m.board.ByStatus(s)
+	if m.familyID == "" {
+		return items
+	}
+	out := make([]task.Task, 0, len(items))
+	for _, t := range items {
+		if t.ID == m.familyID || t.ParentID == m.familyID {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // selectedTask is the card under the cursor, if the column is not empty.
 func (m BoardModel) selectedTask() (task.Task, bool) {
-	items := m.board.ByStatus(m.currentStatus())
+	items := m.visibleByStatus(m.currentStatus())
 	i := m.sel[m.col]
 	if i < 0 || i >= len(items) {
 		return task.Task{}, false
@@ -204,7 +245,7 @@ func (m BoardModel) selectedTask() (task.Task, bool) {
 // clampSelection keeps every column's cursor inside its item range.
 func (m *BoardModel) clampSelection() {
 	for i, s := range m.board.Statuses() {
-		n := len(m.board.ByStatus(s))
+		n := len(m.visibleByStatus(s))
 		if m.sel[i] >= n {
 			m.sel[i] = n - 1
 		}
@@ -214,20 +255,46 @@ func (m *BoardModel) clampSelection() {
 	}
 }
 
+// selectTaskID restores cursor identity after filtering or mutation.
+func (m *BoardModel) selectTaskID(id string) bool {
+	for col, s := range m.board.Statuses() {
+		for i, t := range m.visibleByStatus(s) {
+			if t.ID == id {
+				m.col, m.sel[col] = col, i
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// reconcileFamily clears a stale family filter and restores selection by ID
+// after live reload or archival changes.
+func (m *BoardModel) reconcileFamily(selectedID string) {
+	if m.familyID != "" {
+		if selected, ok := m.board.TaskByID(selectedID); ok && !selected.Archived {
+			m.familyID = m.board.FamilyRootID(selected)
+		}
+		root, ok := m.board.TaskByID(m.familyID)
+		if !ok || root.Archived || root.ParentID != "" {
+			m.familyID = ""
+		}
+	}
+	if selectedID == "" || !m.selectTaskID(selectedID) {
+		m.clampSelection()
+	}
+}
+
 const (
-	// minColumnWidth is the floor set by the widest deadline line
-	// ("● DD/MM/YYYY ✗", 14 columns) plus the card's own border and padding.
-	// Do not lower this without re-checking
-	// TestCardDeadlineFitsAtMinimumColumnWidth.
+	// minColumnWidth fits the widest deadline line ("● DD/MM/YYYY ✗", 14
+	// columns) plus the card's border and padding.
 	minColumnWidth = 18
-	// columnChrome is how much wider than its content each rendered column
-	// is: ColumnStyle's one-column border plus one-column padding, on each
-	// side that columnWidth's "w/n - columnChrome" already subtracts for.
+	// columnChrome is each column's extra width beyond its content (border
+	// plus padding).
 	columnChrome = 2
 )
 
-// columnWidth splits the terminal evenly across the board's columns, leaving
-// room for each column's border and padding.
+// columnWidth splits the terminal evenly across the board's columns.
 func (m BoardModel) columnWidth() int {
 	w := m.width
 	if w <= 0 {
@@ -246,17 +313,15 @@ func (m BoardModel) minBoardWidth() int {
 	return len(m.board.Statuses()) * (minColumnWidth + columnChrome)
 }
 
-// minColumnBlockHeight is the least columnHeight() will ever return: header,
-// blank line, one card row, plus the column's own top+bottom border.
+// minColumnBlockHeight is columnHeight's floor: header, blank, one card row,
+// and the column's top+bottom border.
 const minColumnBlockHeight = 5
 
-// rawColumnHeight is columnHeight() before its floor is applied — what the
-// terminal actually has room for, which can go negative on a very short
-// terminal. Reserves one row for the tab bar (AppModel joins that on above
-// this model's own View), two for the column block's border, and one spare
-// row so the board isn't rendered flush against the very last line.
+// rawColumnHeight is columnHeight without its floor; it can go negative.
+// Reserves the tab bar row and the column border's two rows, so the footer
+// lands on the last row like every other page's.
 func (m BoardModel) rawColumnHeight() int {
-	return m.height - 4 - m.footerRows
+	return m.height - 3 - m.footerRows
 }
 
 func (m BoardModel) columnHeight() int {
@@ -267,28 +332,27 @@ func (m BoardModel) columnHeight() int {
 	return h
 }
 
-// View renders the board's columns side by side plus the footer line, or a
-// centred popup when a task is expanded or the form is open. Below
-// minBoardWidth the columns would overflow and wrap into a scrambled mess,
-// so it renders a short warning instead — the popups are exempt, they size
-// themselves and stay readable on a narrow terminal. m.width == 0 (before
-// the first WindowSizeMsg) falls through to the normal path, which defaults
-// to 80.
-//
-// The footer is measured before the columns are laid out so columnHeight has
-// its real height rather than a hard-coded guess. m has a value receiver, so
-// the recorded height is stashed on this local copy before it is used below.
+// View renders the columns plus footer, or a centred popup. Below
+// minBoardWidth it shows a warning instead of wrapped columns (popups are
+// exempt). The footer is measured first so columnHeight sees its real height.
 func (m BoardModel) View() string {
 	switch m.mode {
 	case modeDetail:
 		return m.overlay(m.renderDetail())
 	case modeInput:
 		return m.overlay(m.renderForm())
+	case modeConfirm:
+		return m.overlay(m.renderConfirm())
 	}
 	if need := m.minBoardWidth(); m.width > 0 && m.width < need {
-		return MutedStyle.Render(fmt.Sprintf(
-			"terminal too narrow\n\ngotodo needs at least %d columns for the %d-column board.\nThis terminal is %d. Widen it, or press tab for Analytics or Archive.",
-			need, len(m.board.Statuses()), m.width))
+		msg := fmt.Sprintf("gotodo needs at least %d columns for the %d-column board. This terminal is %d. Widen it, or press tab for the other pages.",
+			need, len(m.board.Statuses()), m.width)
+		w := m.popupWidth()
+		return m.overlay(ColumnStyle.Copy().Width(w).Render(strings.Join([]string{
+			ErrorStyle.Render("Terminal too narrow"),
+			MutedStyle.Render(strings.Repeat("─", w-2)),
+			MutedStyle.Copy().Width(w - 2).Render(msg),
+		}, "\n")))
 	}
 	footer := m.renderFooter()
 	m.footerRows = lipgloss.Height(footer)
@@ -303,16 +367,19 @@ func (m BoardModel) View() string {
 }
 
 func (m BoardModel) renderColumn(idx int, s task.Status, width int) string {
-	items := m.board.ByStatus(s)
+	items := m.visibleByStatus(s)
 
-	header := HeaderStyle(s).Render(s.Label()) +
-		MutedStyle.Render(" ("+strconv.Itoa(len(items))+")")
+	count := strconv.Itoa(len(items))
+	if m.familyID != "" {
+		count += "/" + strconv.Itoa(len(m.board.ByStatus(s)))
+	}
+	header := HeaderStyle(s).Render(s.Label()) + MutedStyle.Render(" ("+count+")")
 
 	var lines []string
 	lines = append(lines, header, "")
 
 	if len(items) == 0 {
-		lines = append(lines, MutedStyle.Render("empty"))
+		lines = append(lines, MutedStyle.Render("  empty"))
 	}
 	lines = append(lines, m.renderCardWindow(idx, items, width)...)
 
@@ -327,11 +394,9 @@ func (m BoardModel) renderColumn(idx int, s task.Status, width int) string {
 		Render(strings.Join(lines, "\n"))
 }
 
-// renderCardWindow renders as many cards as fit within the column's height
-// (lipgloss.Style.Height only pads, it does not clip), separated by a blank
-// line. When some cards do not fit it emits a trailing "+N more" line, and
-// scrolls the window down so the currently selected card is always shown
-// rather than clipped away.
+// renderCardWindow renders the cards that fit the column height, keeping the
+// selected card visible and ending with "+N more" when some are cut.
+// lipgloss Height only pads, it never clips, so the windowing happens here.
 func (m BoardModel) renderCardWindow(idx int, items []task.Task, width int) []string {
 	avail := m.columnHeight() - 2 // header + blank line already emitted
 
@@ -357,29 +422,21 @@ func (m BoardModel) renderCardWindow(idx int, items []task.Task, width int) []st
 		lines = append(lines, rendered[i])
 	}
 	if more > 0 {
-		lines = append(lines, MutedStyle.Render(fmt.Sprintf("+%d more", more)))
+		lines = append(lines, MutedStyle.Render(fmt.Sprintf("  +%d more", more)))
 	}
 	return lines
 }
 
-// fitWindow picks the run of entries [start, end) that fits within avail
-// rows — heights[i] gives entry i's own row count, and every entry after
-// the first in the window costs one more row for its blank separator — while
-// scrolling so the entry at sel (if any, sel < 0 means nothing is selected)
-// stays inside the window rather than falling off past the fold. more
-// reports how many trailing entries were left out, after reserving a row
-// for the "+N more" line the caller appends when it is non-zero.
-//
-// Shared by BoardModel's card columns and ArchiveModel's single list: both
-// need the same variable-height, keep-the-selection-visible windowing.
+// fitWindow picks the entries [start, end) that fit in avail rows, counting a
+// blank separator between entries and scrolling so sel (if >= 0) stays
+// visible. more is the count left out after reserving a "+N more" row.
+// Shared by the board columns and the archive list.
 func fitWindow(heights []int, avail, sel int) (start, end, more int) {
 	if avail < 1 {
 		avail = 1
 	}
 	n := len(heights)
 
-	// windowRows is the row count of [s,e), including the blank separator
-	// before every entry after the first in the window.
 	windowRows := func(s, e int) int {
 		rows := 0
 		for i := s; i < e; i++ {
@@ -391,7 +448,6 @@ func fitWindow(heights []int, avail, sel int) (start, end, more int) {
 		return rows
 	}
 
-	// fit grows e greedily from s while the window still fits in avail.
 	fit := func(s int) int {
 		e := s
 		for e < n && windowRows(s, e+1) <= avail {
@@ -419,24 +475,41 @@ func fitWindow(heights []int, avail, sel int) (start, end, more int) {
 	return start, end, more
 }
 
-// renderCard draws one card: title, optional description, optional deadline.
-// A card is 1 to 3 lines tall depending on which fields are set.
+// renderCard draws one card with compact relationship context.
 func (m BoardModel) renderCard(colIdx, itemIdx int, t task.Task, width int) string {
 	inner := width - 4
 	selected := colIdx == m.col && itemIdx == m.sel[m.col]
 	grabbed := selected && m.mode == modeMove && t.ID == m.grabID
 
-	title := truncate(t.Title, inner)
+	// The countdown sits right-aligned on the title row: the one thing on a
+	// card allowed to be loud.
+	prefix := ""
 	if grabbed {
-		title = "⇄ " + truncate(t.Title, inner-2)
+		prefix = "⇄ "
+	}
+	due := Countdown(t, m.now(), m.board.DoneStatus())
+	room := inner - lipgloss.Width(prefix)
+	if due != "" {
+		room -= lipgloss.Width(due) + 1
+	}
+	title := prefix + truncate(t.Title, max(room, 1))
+	if due != "" {
+		title += strings.Repeat(" ", max(inner-lipgloss.Width(title)-lipgloss.Width(due), 1)) + due
 	}
 
 	lines := []string{title}
+	if t.ParentID != "" {
+		if parent, ok := m.board.TaskByID(t.ParentID); ok {
+			lines = append(lines, MutedStyle.Render(truncate("↳ "+parent.Title, inner)))
+		}
+	} else if done, total := m.board.ChildProgress(t.ID); total > 0 {
+		lines = append(lines, progressBar(done, total)+MutedStyle.Render(fmt.Sprintf(" %d of %d subtasks", done, total)))
+	}
 	if t.Description != "" {
 		lines = append(lines, descLine(t.Description, inner))
 	}
-	if dl := RenderDeadline(t, m.now(), m.board.DoneStatus()); dl != "" {
-		lines = append(lines, dl)
+	if t.Worktree != "" {
+		lines = append(lines, MutedStyle.Render(truncate("⎇ "+filepath.Base(t.Worktree), inner)))
 	}
 	body := strings.Join(lines, "\n")
 
@@ -445,16 +518,40 @@ func (m BoardModel) renderCard(colIdx, itemIdx int, t task.Task, width int) stri
 		return CardGrabbedStyle.Render(body)
 	case selected && m.focus == focusItem:
 		return CardSelectedStyle.Render(body)
+	case m.inSelectedFamily(t):
+		return CardRelatedStyle.Render(body)
 	default:
 		return CardStyle.Render(body)
 	}
 }
 
-// descLine is the one-line description a list entry shows. A multi-line
-// description collapses to its first line plus an ellipsis, so a long note
-// cannot stretch a card past the row budget its column planned for it — the
-// whole thing is one enter away in the detail popup. Shared by the board's
-// cards and the archive's list.
+// inSelectedFamily reports whether t shares a family with the selected card
+// (and is not that card), so related cards can be marked across columns.
+func (m BoardModel) inSelectedFamily(t task.Task) bool {
+	if m.mode != modeNormal || m.focus != focusItem {
+		return false
+	}
+	sel, ok := m.selectedTask()
+	if !ok || sel.ID == t.ID {
+		return false
+	}
+	root := m.board.FamilyRootID(sel)
+	return m.board.FamilyRootID(t) == root && (t.ParentID != "" || sel.ParentID != "")
+}
+
+// progressBar draws subtask completion: one cell per subtask up to five,
+// scaled beyond that, green for done.
+func progressBar(done, total int) string {
+	cells, filled := total, done
+	if total > 5 {
+		cells, filled = 5, done*5/total
+	}
+	return lipgloss.NewStyle().Foreground(colDone).Render(strings.Repeat("▰", filled)) +
+		MutedStyle.Render(strings.Repeat("▱", cells-filled))
+}
+
+// descLine is the one-line description shown on cards and archive entries;
+// multi-line text collapses to its first line plus an ellipsis.
 func descLine(desc string, width int) string {
 	first, rest, _ := strings.Cut(desc, "\n")
 	if strings.TrimSpace(rest) != "" {
@@ -463,9 +560,8 @@ func descLine(desc string, width int) string {
 	return MutedStyle.Render(truncate(first, width))
 }
 
-// rowsHeight is how many terminal rows a slice of panel rows occupies —
-// lipgloss.Height of the joined block, except that no rows occupy none
-// (joining an empty slice would otherwise measure as one blank row).
+// rowsHeight is the terminal height of the joined rows; empty is zero, where
+// lipgloss.Height("") would report one.
 func rowsHeight(rows []string) int {
 	if len(rows) == 0 {
 		return 0
@@ -473,78 +569,225 @@ func rowsHeight(rows []string) int {
 	return lipgloss.Height(strings.Join(rows, "\n"))
 }
 
-// detailBudget is how many content rows the detail panel may use before it
-// overflows the terminal: the border costs two rows and View's own reserve
-// another two. A terminal size we have not been told yet is unbounded.
+// detailBudget is the content rows the detail panel may use: the terminal
+// minus the tab row and the panel's two border rows. Unbounded until sized.
 func (m BoardModel) detailBudget() int {
 	if m.height <= 0 {
 		return 1 << 30
 	}
-	return m.height - 4
+	return m.height - 3
 }
 
-// renderDetail is the centred popup for the selected task: the full title and
-// description wrapped rather than truncated, and the deadline shown on the
-// same month calendar the form uses.
-//
-// There is no scrolling here, so on a terminal too short for everything the
-// panel gives things up in order rather than overflowing: the calendar goes
-// first, then the description is clipped to what is left with an ellipsis
-// marking the cut. The title, status, deadline line and hint always stay.
-// ponytail: clipping, not a viewport — add one if reading long descriptions
-// on a short terminal becomes a real habit.
+// detailMaxBodyRows caps the scrolling body even on a tall terminal.
+const detailMaxBodyRows = 15
+
+// detailLayout splits the detail popup into fixed parts (head, props) and the
+// body (subtasks, description), which scrolls once it outgrows window rows.
+type detailLayout struct {
+	head, props, body []string
+	window            int
+}
+
+func (m BoardModel) detailLayout(t task.Task, w int) detailLayout {
+	l := detailLayout{head: m.detailHead(t, w), props: m.detailProps(t, w), body: m.detailBodyLines(t, w)}
+	// Budget the scrolling footer: with its counter it can wrap a row taller.
+	avail := m.detailBudget() - rowsHeight(l.head) - rowsHeight(l.props) - rowsHeight(detailFoot("999–999 / 999", w))
+	if len(l.props) > 0 {
+		avail-- // blank row between props and body
+	}
+	if l.window = min(len(l.body), detailMaxBodyRows, avail); l.window < 2 {
+		l.window = 0 // not even a label and one row: drop the body
+	}
+	return l
+}
+
+// renderDetail is the centred popup for the selected task, laid out like the
+// form: label rows with a hint on the right, indented values, one blank row
+// between sections.
 func (m BoardModel) renderDetail() string {
 	t, ok := m.selectedTask()
 	if !ok {
 		return ""
 	}
 	w := m.popupWidth()
-	wrap := lipgloss.NewStyle().Width(w)
+	cw := max(w-2, 1) // ColumnStyle's padding comes out of Width
+	l := m.detailLayout(t, cw)
 
-	head := []string{
-		wrap.Copy().Bold(true).Foreground(AccentFor(t.Status)).Render(t.Title),
-		MutedStyle.Render(t.Status.Label()),
-	}
-	foot := []string{"", MutedStyle.Render("e edit · d delete · esc close")}
-
-	var when []string
-	if dl := RenderDeadline(t, m.now(), m.board.DoneStatus()); dl != "" {
-		when = []string{"", dl}
-		// The deadline's own month, the day bracketed and today green, so
-		// "how far off is this" reads at a glance instead of from date
-		// arithmetic. Anchored to now's zone, the zone RenderDeadline and
-		// DeadlineUrgency both work in.
-		cal := []string{"", newDatePicker(t.Deadline.In(m.now().Location())).View(m.now())}
-		if rowsHeight(head)+rowsHeight(when)+rowsHeight(cal)+rowsHeight(foot) <= m.detailBudget() {
-			when = append(when, cal...)
+	rows := append(append([]string{}, l.head...), l.props...)
+	counter := ""
+	if l.window > 0 {
+		start := min(max(m.detailScroll, 0), len(l.body)-l.window)
+		if l.window < len(l.body) {
+			counter = fmt.Sprintf("%d–%d / %d", start+1, start+l.window, len(l.body))
 		}
-	}
-
-	var desc []string
-	if t.Description != "" {
-		desc = append([]string{""},
-			strings.Split(wrap.Copy().Foreground(ColText).Render(t.Description), "\n")...)
-		room := m.detailBudget() - rowsHeight(head) - rowsHeight(when) - rowsHeight(foot)
-		switch {
-		case room < 2: // not even a blank line and one line of text
-			desc = nil
-		case room < len(desc):
-			desc = append(desc[:room-1], MutedStyle.Render("…"))
+		if len(l.props) > 0 {
+			rows = append(rows, "")
 		}
+		rows = append(rows, l.body[start:start+l.window]...)
 	}
-
-	rows := append(append(append(head, desc...), when...), foot...)
+	rows = append(rows, detailFoot(counter, cw)...)
 	return ColumnStyle.Copy().Width(w).Render(strings.Join(rows, "\n"))
 }
 
-// parseDeadline reads a DD/MM/YYYY date. Blank means "no deadline", which is
-// not an error. The layout matches FormatDate, so what the card shows is
-// exactly what you type back in.
-//
-// Parsed in the local zone, not UTC: DaysUntilDeadline re-anchors the
-// deadline to now's location before taking its calendar day. Parsing into
-// UTC would shift that calendar day back for anyone west of UTC, making a
-// deadline typed for "today" read as overdue on the day it's due.
+// detailLabel is a read-only section label, styled like an unfocused form
+// label so the two popups read as one design.
+func detailLabel(label, hint string, width int) string {
+	return formLabel(-1, 0, label, hint, width)
+}
+
+// indent puts a value under its label, aligned with the form's input text.
+func indent(s string) string { return "  " + s }
+
+// detailHead is the title, wrapped on words, and the status/meta line.
+func (m BoardModel) detailHead(t task.Task, width int) []string {
+	title := strings.Join(strings.Fields(t.Title), " ")
+	return []string{
+		lipgloss.NewStyle().Width(width).Bold(true).Foreground(ColText).Render(title),
+		lipgloss.NewStyle().MaxWidth(width).Render(detailMetaLine(t, m.now())),
+		MutedStyle.Render(strings.Repeat("─", width)),
+	}
+}
+
+// detailProps are the fixed sections: Deadline and Worktree (side by side
+// when both are set, as in the form), then Parent.
+func (m BoardModel) detailProps(t task.Task, width int) []string {
+	var sections []string
+	due := Countdown(t, m.now(), m.board.DoneStatus())
+	date := ""
+	if t.Deadline != nil {
+		date = indent(FormatDate(t.Deadline.In(m.now().Location())))
+	}
+	switch {
+	case t.Deadline != nil && t.Worktree != "":
+		dlW, wtW := formDateWidths(width)
+		sections = append(sections, lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(dlW).Render(detailLabel("Deadline", due, dlW)+"\n"+date),
+			"  ",
+			lipgloss.NewStyle().Width(wtW).Render(detailLabel("Worktree", "", wtW)+"\n"+indent(truncate(t.Worktree, wtW-2)))))
+	case t.Deadline != nil:
+		sections = append(sections, detailLabel("Deadline", due, width)+"\n"+date)
+	case t.Worktree != "":
+		sections = append(sections, detailLabel("Worktree", "", width)+"\n"+indent(truncate(t.Worktree, width-2)))
+	}
+	if t.ParentID != "" {
+		if parent, ok := m.board.TaskByID(t.ParentID); ok {
+			id := MutedStyle.Render("  " + shortTaskID(parent.ID))
+			sections = append(sections, detailLabel("Parent", statusWord(parent.Status), width)+"\n"+
+				indent(truncate(parent.Title, max(width-2-lipgloss.Width(id), 1))+id))
+		} else {
+			sections = append(sections, detailLabel("Parent", "missing", width)+"\n"+indent(MutedStyle.Render(shortTaskID(t.ParentID))))
+		}
+	}
+	var rows []string
+	for i, sec := range sections {
+		if i > 0 {
+			rows = append(rows, "")
+		}
+		rows = append(rows, strings.Split(sec, "\n")...)
+	}
+	return rows
+}
+
+// detailFoot is the popup's hint footer. A non-empty counter means the body
+// scrolls: it adds the j/k hint and the window position.
+func detailFoot(counter string, width int) []string {
+	hints := []string{keyHint("s", "Subtask"), keyHint("e", "Edit"), keyHint("d", "Delete"), keyHint("esc", "Close")}
+	if counter != "" {
+		hints = append([]string{keyHint("j/k", "Scroll")}, append(hints, MutedStyle.Render(counter))...)
+	}
+	return popupFoot(width, hints...)
+}
+
+// popupFoot is the rule and hint bar closing every centred panel.
+func popupFoot(width int, hints ...string) []string {
+	return []string{MutedStyle.Render(strings.Repeat("─", width)), hintBar(width, hints...)}
+}
+
+// detailMetaLine is the line under the title: status, ages and moves.
+// Zero-value parts are left out, so a fresh card reads `TODO  created 0m ago`.
+func detailMetaLine(t task.Task, now time.Time) string {
+	parts := []string{shortTaskID(t.ID)}
+	if age := now.Sub(t.CreatedAt); age >= 0 {
+		parts = append(parts, "created "+ago(age))
+	}
+	if t.UpdatedAt.After(t.CreatedAt.Add(time.Minute)) {
+		if age := now.Sub(t.UpdatedAt); age >= 0 {
+			parts = append(parts, "updated "+ago(age))
+		}
+	}
+	if n := len(t.History); n == 1 {
+		parts = append(parts, "1 move")
+	} else if n > 1 {
+		parts = append(parts, fmt.Sprintf("%d moves", n))
+	}
+	meta := ""
+	if len(parts) > 0 {
+		meta = MutedStyle.Render("   " + strings.Join(parts, "   "))
+	}
+	return HeaderStyle(t.Status).Render(statusWord(t.Status)) + meta
+}
+
+// ago is an age at reading precision: whole days once past a day.
+func ago(d time.Duration) string {
+	if d >= 24*time.Hour {
+		d = d.Truncate(24 * time.Hour)
+	}
+	return FormatDuration(d) + " ago"
+}
+
+// statusWord is a column name as it reads inside a sentence: "testing/review".
+func statusWord(s task.Status) string { return strings.ToLower(s.Label()) }
+
+func matchCount(n int) string {
+	if n == 1 {
+		return "1 match"
+	}
+	return fmt.Sprintf("%d matches", n)
+}
+
+// detailBodyLines is the scrollable part: the Subtasks checklist, then the
+// Description, each under a form-style label. Empty when there is neither.
+func (m BoardModel) detailBodyLines(t task.Task, w int) []string {
+	var rows []string
+	if children := m.board.Children(t.ID); len(children) > 0 {
+		done, total := m.board.ChildProgress(t.ID)
+		rows = append(rows, detailLabel("Subtasks", fmt.Sprintf("%d of %d complete", done, total), w))
+		for _, child := range children {
+			rows = append(rows, indent(m.childDetailLine(child, w-2)))
+		}
+	}
+	if t.Description != "" {
+		if len(rows) > 0 {
+			rows = append(rows, "")
+		}
+		rows = append(rows, detailLabel("Description", "", w))
+		for _, line := range strings.Split(renderMarkdown(t.Description, w-2), "\n") {
+			rows = append(rows, indent(line))
+		}
+	}
+	return rows
+}
+
+// childDetailLine is one checklist row: a tick or circle, the title, and
+// the subtask's column on the right.
+func (m BoardModel) childDetailLine(child task.Task, w int) string {
+	mark := lipgloss.NewStyle().Foreground(AccentFor(child.Status)).Render("○")
+	if child.Status == m.board.DoneStatus() {
+		mark = lipgloss.NewStyle().Foreground(colDone).Render("✓")
+	}
+	status := statusWord(child.Status)
+	if child.Archived {
+		status += ", archived"
+	}
+	right := MutedStyle.Render(status)
+	title := truncate(child.Title, max(w-lipgloss.Width(right)-4, 1))
+	gap := max(w-2-lipgloss.Width(title)-lipgloss.Width(right), 1) // 2 = mark and space
+	return mark + " " + title + strings.Repeat(" ", gap) + right
+}
+
+// parseDeadline reads a DD/MM/YYYY date (FormatDate's layout); blank means no
+// deadline. Parsed in local time: UTC would shift the calendar day back west
+// of UTC and make today's deadline read as overdue.
 func parseDeadline(s string) (*time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -557,9 +800,16 @@ func parseDeadline(s string) (*time.Time, error) {
 	return &d, nil
 }
 
+func shortTaskID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
 // openForm puts the model into the add/edit form, seeded with the given
 // values and focused on the title.
-func (m *BoardModel) openForm(editID, title, desc string, deadline *time.Time) {
+func (m *BoardModel) openForm(editID, title, desc string, deadline *time.Time, worktree, parentID string) {
 	m.mode = modeInput
 	m.editID = editID
 	m.field = fieldTitle
@@ -572,7 +822,24 @@ func (m *BoardModel) openForm(editID, title, desc string, deadline *time.Time) {
 	m.title.SetValue(title)
 	m.desc.SetValue(desc)
 	m.deadline.SetValue(dl)
+	m.worktree.SetValue(worktree)
+	m.formParentID = parentID
+	m.parentIndex = 0
+	m.parentChoosing = false
+	parentText := ""
+	if parent, ok := m.board.TaskByID(parentID); ok {
+		parentText = parent.Title
+	}
+	m.parent.SetValue(parentText)
 	m.applyFieldFocus() // sizes the fields too
+}
+
+// openSubtaskForm opens a new task under t's family root, starting in the
+// root's worktree since subtasks usually share it.
+func (m *BoardModel) openSubtaskForm(t task.Task) {
+	rootID := m.board.FamilyRootID(t)
+	root, _ := m.board.TaskByID(rootID)
+	m.openForm("", "", "", nil, root.Worktree, rootID)
 }
 
 // closeForm returns to normal mode and drops focus from every field.
@@ -584,14 +851,22 @@ func (m *BoardModel) closeForm() {
 	m.title.Blur()
 	m.desc.Blur()
 	m.deadline.Blur()
+	m.worktree.Blur()
+	m.parent.Blur()
+	m.formParentID = ""
+	m.parent.SetValue("")
+	m.parentIndex = 0
+	m.parentChoosing = false
 }
 
-// applyFieldFocus puts the cursor in m.field's widget and takes it off the
-// other two, and opens the calendar only on the Deadline field.
+// applyFieldFocus focuses m.field's widget, blurs the rest, and opens the
+// calendar only on the Deadline field.
 func (m *BoardModel) applyFieldFocus() {
 	m.title.Blur()
 	m.desc.Blur()
 	m.deadline.Blur()
+	m.worktree.Blur()
+	m.parent.Blur()
 	switch m.field {
 	case fieldTitle:
 		m.title.Focus()
@@ -601,6 +876,13 @@ func (m *BoardModel) applyFieldFocus() {
 	case fieldDeadline:
 		m.deadline.Focus()
 		m.deadline.CursorEnd()
+	case fieldWorktree:
+		m.worktree.Focus()
+		m.worktree.CursorEnd()
+	case fieldParent:
+		m.parent.Focus()
+		m.parent.CursorEnd()
+		m.parentIndex = 0
 	}
 	if m.field == fieldDeadline {
 		m.seedPicker()
@@ -616,61 +898,337 @@ func (m *BoardModel) focusField(delta int) {
 	m.applyFieldFocus()
 }
 
-// renderForm draws the three-field entry panel, centred by View.
+// renderForm draws the add/edit form: title, description, deadline/worktree,
+// parent, then the relationships summary.
 func (m BoardModel) renderForm() string {
-	heading := "new task"
+	heading := "New task"
 	if m.editID != "" {
-		heading = "edit task"
+		heading = "Edit task"
 	}
-	label := func(i int, text string) string {
-		style := MutedStyle
-		if i == m.field {
-			style = lipgloss.NewStyle().Foreground(ColAccent).Bold(true)
-		}
-		return style.Render(fmt.Sprintf("%-*s", labelWidth, text))
+	width := m.popupWidth()
+	contentWidth := width - 2
+
+	spacer := []string{}
+	if m.formGaps() > 0 {
+		spacer = []string{""}
 	}
 
 	rows := []string{
 		TitleStyle.Render(heading),
-		label(fieldTitle, "Title") + m.title.View(),
-		// The description box is several rows tall, so its label is joined
-		// alongside rather than concatenated onto the first line.
-		lipgloss.JoinHorizontal(lipgloss.Top, label(fieldDesc, "Description"), m.desc.View()),
-		label(fieldDeadline, "Deadline") + m.deadline.View(),
+		MutedStyle.Render(strings.Repeat("─", contentWidth)),
+		formLabel(fieldTitle, m.field, "Title", "required", contentWidth),
+		m.title.View(),
 	}
+	rows = append(rows, spacer...)
+	if !m.compactParentForm() {
+		rows = append(rows,
+			formLabel(fieldDesc, m.field, "Description", "ctrl+j new line", contentWidth),
+			m.desc.View())
+		rows = append(rows, spacer...)
+	}
+	dlW, wtW := formDateWidths(contentWidth)
+	rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(dlW).Render(formLabel(fieldDeadline, m.field, "Deadline", "dd/mm/yyyy", dlW)+"\n"+m.deadline.View()),
+		"  ",
+		lipgloss.NewStyle().Width(wtW).Render(formLabel(fieldWorktree, m.field, "Worktree", "path or branch", wtW)+"\n"+m.worktree.View())))
+	rows = append(rows, spacer...)
+	rows = append(rows,
+		formLabel(fieldParent, m.field, "Parent", "type to filter, ↑↓ to choose", contentWidth),
+		m.parent.View())
+	if m.field == fieldParent {
+		if dropdown := m.renderParentDropdown(contentWidth); dropdown != "" {
+			rows = append(rows, dropdown)
+		}
+	}
+	rows = append(rows, m.formRelationships(contentWidth)...)
 	if m.err != "" {
-		rows = append(rows, lipgloss.NewStyle().Foreground(AccentFor(task.StatusBlocked)).
-			Render("! "+m.err))
+		rows = append(rows, errorLine(m.err))
 	}
 	if _, calendar := m.formRows(); calendar {
-		rows = append(rows, "", m.picker.View(m.now()), "",
-			MutedStyle.Render("hjkl day/week · t today · or type the date"))
+		rows = append(rows, "", m.picker.View(m.now()),
+			keyHint("hjkl", "Move")+"  "+keyHint("t", "Today")+MutedStyle.Render("  or type a date"))
 	}
-	rows = append(rows, MutedStyle.Render("tab field · ctrl+j new line · enter save · esc cancel"))
-	return ColumnStyle.Copy().Width(m.popupWidth()).Render(strings.Join(rows, "\n"))
+	rows = append(rows, popupFoot(contentWidth,
+		keyHint("tab", "Field"), keyHint("ctrl+j", "New line"), keyHint("enter", "Save"), keyHint("esc", "Cancel"))...)
+	return ColumnStyle.Copy().Width(width).Render(strings.Join(rows, "\n"))
 }
 
+// formRelationships is the read-only links block under the Parent selector:
+// a new subtask names its parent, an edited parent lists its subtasks.
+func (m BoardModel) formRelationships(width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	if m.editID == "" {
+		if m.formParentID == "" {
+			return nil
+		}
+		parent, ok := m.board.TaskByID(m.formParentID)
+		if !ok {
+			return nil
+		}
+		return []string{"", MutedStyle.Render("Subtask of  ") + truncate(parent.Title+"  "+shortTaskID(parent.ID), width-12)}
+	}
+	t, ok := m.board.TaskByID(m.editID)
+	if !ok {
+		return nil
+	}
+	children := m.board.Children(t.ID)
+	if len(children) == 0 {
+		return nil
+	}
+	done, total := m.board.ChildProgress(t.ID)
+	rows := []string{"", MutedStyle.Copy().Bold(true).Render(formatSubtaskHeader(done, total))}
+	for i, child := range children {
+		if i >= 3 {
+			rows = append(rows, MutedStyle.Render(truncate(fmt.Sprintf("  +%d more", len(children)-3), width)))
+			break
+		}
+		rows = append(rows, MutedStyle.Render(truncate("  • "+child.Title, width)))
+	}
+	return rows
+}
+
+func formatSubtaskHeader(done, total int) string {
+	return fmt.Sprintf("Subtasks  %d of %d", done, total)
+}
+
+// parentOptions returns assignable top-level tasks in board order. Done tasks
+// are excluded except the current parent, so an edit keeps a done family.
+func (m BoardModel) parentOptions() []task.Task {
+	if m.editID != "" && len(m.board.Children(m.editID)) > 0 {
+		return nil // a parent task cannot itself become a subtask
+	}
+	var options []task.Task
+	for _, candidate := range m.board.Active() {
+		if candidate.ID == m.editID || candidate.ParentID != "" {
+			continue
+		}
+		if candidate.Status == m.board.DoneStatus() && candidate.ID != m.formParentID {
+			continue
+		}
+		options = append(options, candidate)
+	}
+	return options
+}
+
+const parentDropdownRows = 4
+
+func (m BoardModel) compactParentForm() bool {
+	return m.field == fieldParent && m.height > 0 && m.height < 19
+}
+
+// formGaps is the number of blank rows between form sections; short terminals
+// drop them so the form still fits.
+func (m BoardModel) formGaps() int {
+	if m.height > 0 && m.height < 18 {
+		return 0
+	}
+	return 3
+}
+
+func (m BoardModel) filteredParentOptions() []task.Task {
+	query := strings.ToLower(strings.TrimSpace(m.parent.Value()))
+	options := m.parentOptions()
+	if query == "" {
+		return options
+	}
+	filtered := make([]task.Task, 0, len(options))
+	for _, option := range options {
+		if strings.Contains(strings.ToLower(option.Title), query) || strings.HasPrefix(strings.ToLower(option.ID), query) {
+			filtered = append(filtered, option)
+		}
+	}
+	return filtered
+}
+
+func (m BoardModel) parentDropdownHeight() int {
+	if m.field != fieldParent {
+		return 0
+	}
+	rows := len(m.filteredParentOptions())
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > parentDropdownRows {
+		rows = parentDropdownRows
+	}
+	desired := rows + 3 // heading + top/bottom border
+	if m.height <= 0 {
+		return desired
+	}
+	base := 12 + m.formGaps() // fixed form furniture plus one description row
+	if m.compactParentForm() {
+		base = 10 + m.formGaps() // description section hidden while choosing
+	}
+	available := m.height - 3 - base
+	if available < 0 {
+		return 0
+	}
+	if desired > available {
+		return available
+	}
+	return desired
+}
+
+func (m *BoardModel) moveParentHighlight(delta int) {
+	options := m.filteredParentOptions()
+	if len(options) == 0 {
+		m.parentIndex = 0
+		return
+	}
+	m.parentIndex = (m.parentIndex + delta + len(options)) % len(options)
+	m.parentChoosing = true
+}
+
+func (m *BoardModel) chooseHighlightedParent() bool {
+	options := m.filteredParentOptions()
+	if len(options) == 0 {
+		return false
+	}
+	if m.parentIndex >= len(options) {
+		m.parentIndex = len(options) - 1
+	}
+	chosen := options[m.parentIndex]
+	m.formParentID = chosen.ID
+	m.parent.SetValue(chosen.Title)
+	m.parent.CursorEnd()
+	m.parentIndex = 0
+	m.parentChoosing = false
+	m.sizeForm()
+	return true
+}
+
+func (m BoardModel) renderParentDropdown(width int) string {
+	height := m.parentDropdownHeight()
+	if height == 0 {
+		return ""
+	}
+	options := m.filteredParentOptions()
+	index := m.parentIndex
+	if index >= len(options) {
+		index = max(0, len(options)-1)
+	}
+	heading := truncate(matchCount(len(options)), width-6)
+	lines := []string{MutedStyle.Copy().Bold(true).Render(heading)}
+	if len(options) == 0 {
+		lines = append(lines, MutedStyle.Render(truncate("No matching parent tasks", width-6)))
+	} else {
+		visibleRows := parentDropdownRows
+		if height >= 4 && visibleRows > height-3 {
+			visibleRows = height - 3
+		}
+		if height < 4 {
+			visibleRows = max(1, height-1)
+		}
+		start := 0
+		if index >= visibleRows {
+			start = index - visibleRows + 1
+		}
+		end := start + visibleRows
+		if end > len(options) {
+			end = len(options)
+		}
+		for i := start; i < end; i++ {
+			prefix := "  "
+			style := MutedStyle
+			if i == index {
+				prefix = "› "
+				style = lipgloss.NewStyle().Foreground(ColAccent).Bold(true)
+			}
+			id := shortTaskID(options[i].ID)
+			avail := width - 8 - len(id) // border, padding, "› " and "  "
+			if avail < 1 {
+				avail = 1
+			}
+			lines = append(lines, style.Render(prefix+truncate(options[i].Title, avail)+"  "+id))
+		}
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	if height < 4 {
+		return strings.Join(lines, "\n")
+	}
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
+		BorderForeground(ColMuted).Padding(0, 1).Width(width - 2).Render(strings.Join(lines, "\n"))
+}
+
+// formDateWidths splits a form row between Deadline and Worktree, two apart.
+func formDateWidths(width int) (deadline, worktree int) {
+	deadline = min(24, width/2-1)
+	return deadline, width - deadline - 2
+}
+
+// formLabel renders a section name with its hint right-aligned; the focused
+// field uses the accent colour.
+func formLabel(field, focused int, label, hint string, width int) string {
+	style := MutedStyle.Copy().Bold(true)
+	if field == focused {
+		style = lipgloss.NewStyle().Foreground(ColAccent).Bold(true)
+	}
+	left := style.Render(label)
+	right := MutedStyle.Render(hint)
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// renderFooter is the hint bar: error or state, mode keys, then global keys.
 func (m BoardModel) renderFooter() string {
-	switch m.mode {
-	case modeMove:
-		return HelpStyle.Render("move: h/l reposition · enter drop · esc cancel")
-	case modeConfirm:
-		return HelpStyle.Render("delete this task? y / n")
-	}
+	var items []string
 	if m.err != "" {
-		return HelpStyle.Render("! " + m.err)
+		items = append(items, errorLine(m.err))
 	}
-	focusLabel := "item"
-	if m.focus == focusColumn {
-		focusLabel = "column"
+	switch {
+	case m.mode == modeMove:
+		if m.err == "" {
+			items = append(items, statusTag("Moving"))
+		}
+		items = append(items, keyHint("h/l", "Reposition"), keyHint("enter", "Drop"), keyHint("esc", "Cancel"))
+		return HelpStyle.Render(hintBar(m.width, items...))
+	case m.familyID != "":
+		name := shortTaskID(m.familyID)
+		if parent, ok := m.board.TaskByID(m.familyID); ok {
+			name = parent.Title
+		}
+		items = append(items, statusTag("Family")+" "+MutedStyle.Render(truncate(name, 30)),
+			keyHint("f", "Show all"), keyHint("s", "Subtask"), keyHint("enter", "Open"), keyHint("m", "Grab"))
+	default:
+		items = append(items, keyHint("hjkl", "Move"), keyHint("enter", "Open"), keyHint("a", "Add"),
+			keyHint("s", "Subtask"), keyHint("e", "Edit"), keyHint("d", "Delete"), keyHint("m", "Grab"),
+			keyHint("f", "Family"), keyHint("ctrl+t", "Focus"))
 	}
-	return HelpStyle.Render(
-		"focus: " + focusLabel + " (ctrl+t) · hjkl move · enter open · a add · e edit · d delete · m grab · tab switch · ? help · q quit")
+	return HelpStyle.Render(hintBar(m.width, append(items, globalHints()...)...))
 }
 
-// truncate shortens s to fit n display columns, appending an ellipsis when
-// it has to cut. It measures with lipgloss.Width, not rune count: CJK and
-// emoji occupy two columns each, so a rune budget silently overflows.
+// renderConfirm is the delete prompt; it names the task so a stray d never
+// deletes blind.
+func (m BoardModel) renderConfirm() string {
+	t, ok := m.selectedTask()
+	if !ok {
+		return ""
+	}
+	w := m.popupWidth()
+	cw := w - 2
+	rows := []string{
+		ErrorStyle.Render("Delete task"),
+		MutedStyle.Render(strings.Repeat("─", cw)),
+		lipgloss.NewStyle().Width(cw).Bold(true).Foreground(ColText).Render(t.Title),
+		"",
+	}
+	if n := len(m.board.Children(t.ID)); n > 0 {
+		rows = append(rows, MutedStyle.Copy().Width(cw).Render(plural(n, "subtask")+" will stay on the board without a parent."))
+	}
+	rows = append(rows, MutedStyle.Render("This cannot be undone."))
+	rows = append(rows, popupFoot(cw, keyHint("y", "Delete"), keyHint("n", "Cancel"))...)
+	return ColumnStyle.Copy().Width(w).Render(strings.Join(rows, "\n"))
+}
+
+// truncate shortens s to n display columns with an ellipsis. It measures
+// display width, not runes, since CJK and emoji take two columns.
 // ponytail: O(n^2) shrink loop on short strings (card titles/descriptions);
 // fine at this size, revisit if it ever runs on long text.
 func truncate(s string, n int) string {
@@ -687,9 +1245,7 @@ func truncate(s string, n int) string {
 	return string(r) + "…"
 }
 
-// Update dispatches on the current mode: modeInput handles add/edit text
-// entry, modeMove handles grab-to-move, modeConfirm handles the delete
-// prompt, and everything else falls through to normal navigation.
+// Update dispatches key messages to the handler for the current mode.
 func (m BoardModel) Update(msg tea.Msg) (BoardModel, tea.Cmd) {
 	keyMsg, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -740,7 +1296,7 @@ func (m BoardModel) updateNormal(keyMsg tea.KeyMsg) (BoardModel, tea.Cmd) {
 		}
 	case "G":
 		if m.focus == focusItem {
-			m.sel[m.col] = len(m.board.ByStatus(m.currentStatus())) - 1
+			m.sel[m.col] = len(m.visibleByStatus(m.currentStatus())) - 1
 		}
 	case "enter":
 		if _, ok := m.selectedTask(); !ok {
@@ -748,14 +1304,39 @@ func (m BoardModel) updateNormal(keyMsg tea.KeyMsg) (BoardModel, tea.Cmd) {
 		}
 		m.focus = focusItem
 		m.mode = modeDetail
+		m.detailScroll = 0
 	case "a":
-		m.openForm("", "", "", nil)
+		m.openForm("", "", "", nil, "", "")
+	case "s":
+		t, ok := m.selectedTask()
+		if !ok {
+			return m, nil
+		}
+		m.openSubtaskForm(t)
 	case "e":
 		t, ok := m.selectedTask()
 		if !ok {
 			return m, nil
 		}
-		m.openForm(t.ID, t.Title, t.Description, t.Deadline)
+		m.openForm(t.ID, t.Title, t.Description, t.Deadline, t.Worktree, t.ParentID)
+	case "f":
+		if m.familyID != "" {
+			selectedID := ""
+			if t, ok := m.selectedTask(); ok {
+				selectedID = t.ID
+			}
+			m.familyID = ""
+			if !m.selectTaskID(selectedID) {
+				m.clampSelection()
+			}
+			break
+		}
+		t, ok := m.selectedTask()
+		if !ok {
+			return m, nil
+		}
+		m.familyID = m.board.FamilyRootID(t)
+		m.selectTaskID(t.ID)
 	case "d":
 		if _, ok := m.selectedTask(); !ok {
 			return m, nil
@@ -795,37 +1376,94 @@ func (m BoardModel) updateInput(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyEnter:
+		if m.field == fieldParent && m.parentChoosing {
+			if m.chooseHighlightedParent() {
+				return m, nil
+			}
+		}
 		title := strings.TrimSpace(m.title.Value())
 		if title == "" {
 			m.err = "title must not be blank"
-			return m, nil // stay in the form
+			m.sizeForm()
+			return m, nil
 		}
 		deadline, err := parseDeadline(m.deadline.Value())
 		if err != nil {
 			m.err = err.Error()
-			return m, nil // stay in the form
+			m.sizeForm()
+			return m, nil
 		}
 		desc := strings.TrimSpace(m.desc.Value())
+		if strings.TrimSpace(m.parent.Value()) != "" && m.formParentID == "" {
+			m.err = "choose a parent from the dropdown, or clear the search"
+			m.field = fieldParent
+			m.applyFieldFocus()
+			return m, nil
+		}
+		parentID := m.formParentID
+		worktree := m.worktree.Value()
 
+		selectedID := m.editID
 		if m.editID != "" {
-			if err := m.board.Edit(m.editID, title, desc, deadline, m.now()); err != nil {
+			if err := m.board.EditWithParent(m.editID, parentID, title, desc, deadline, m.now()); err != nil {
 				m.err = err.Error()
+				m.sizeForm()
 				return m, nil
 			}
 		} else {
-			m.board.Add(title, desc, deadline, m.now())
-			m.col = 0
-			m.sel[0] = len(m.board.ByStatus(m.board.Statuses()[0])) - 1
+			if parentID == "" {
+				selectedID = m.board.Add(title, desc, deadline, m.now()).ID
+			} else {
+				added, err := m.board.AddChild(parentID, title, desc, deadline, m.now())
+				if err != nil {
+					m.err = err.Error()
+					m.sizeForm()
+					return m, nil
+				}
+				selectedID = added.ID
+			}
+		}
+		if err := m.board.SetWorktree(selectedID, worktree, m.now()); err != nil {
+			m.err = err.Error()
+			m.sizeForm()
+			return m, nil
+		}
+		if m.familyID != "" {
+			if saved, ok := m.board.TaskByID(selectedID); ok {
+				m.familyID = m.board.FamilyRootID(saved)
+			}
 		}
 		m.closeForm()
-		m.clampSelection()
+		if !m.selectTaskID(selectedID) {
+			m.clampSelection()
+		}
 		return m, dirty()
 	}
 
-	// On the Deadline field the calendar is always on screen, so hjkl and t
-	// steer it. Those letters are never legitimate input in a DD/MM/YYYY
-	// field, which is what lets the calendar and the text box share the
-	// keyboard without the calendar having to swallow everything.
+	if m.field == fieldParent {
+		switch k.String() {
+		case "up", "ctrl+p":
+			m.moveParentHighlight(-1)
+			return m, nil
+		case "down", "ctrl+n":
+			m.moveParentHighlight(1)
+			return m, nil
+		}
+		before := m.parent.Value()
+		var cmd tea.Cmd
+		m.parent, cmd = m.parent.Update(k)
+		if m.parent.Value() != before {
+			m.formParentID = ""
+			m.parentIndex = 0
+			m.parentChoosing = strings.TrimSpace(m.parent.Value()) != ""
+			m.sizeForm()
+		}
+		m.err = ""
+		return m, cmd
+	}
+
+	// On the Deadline field hjkl and t steer the calendar; those letters are
+	// never valid in a DD/MM/YYYY date, so both can share the keyboard.
 	if m.field == fieldDeadline {
 		moved := true
 		switch k.String() {
@@ -857,18 +1495,18 @@ func (m BoardModel) updateInput(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 		m.title, cmd = m.title.Update(k)
 	case fieldDesc:
 		m.desc, cmd = m.desc.Update(k)
+	case fieldWorktree:
+		m.worktree, cmd = m.worktree.Update(k)
 	case fieldDeadline:
 		m.deadline, cmd = m.deadline.Update(k)
-		// Typing wins over the cursor: once the text parses, the calendar
-		// jumps to it. A half-typed date leaves the cursor where it was.
 		m.seedPicker()
 		m.sizeForm()
 	}
 	return m, cmd
 }
 
-// updateDetail handles the expanded-task popup: read-only, with e/d as the
-// same shortcuts the board uses so the popup is a place to act from too.
+// updateDetail handles the detail popup: j/k/g/G scroll, and s/e/d act as on
+// the board.
 func (m BoardModel) updateDetail(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 	switch k.String() {
 	case "esc", "enter", "q":
@@ -879,23 +1517,46 @@ func (m BoardModel) updateDetail(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 			m.mode = modeNormal
 			return m, nil
 		}
-		m.openForm(t.ID, t.Title, t.Description, t.Deadline)
+		m.openForm(t.ID, t.Title, t.Description, t.Deadline, t.Worktree, t.ParentID)
+	case "s":
+		t, ok := m.selectedTask()
+		if !ok {
+			m.mode = modeNormal
+			return m, nil
+		}
+		m.openSubtaskForm(t)
 	case "d":
 		if _, ok := m.selectedTask(); !ok {
 			m.mode = modeNormal
 			return m, nil
 		}
 		m.mode = modeConfirm
+	case "j", "down":
+		m.detailScroll = m.clampDetailScroll(m.detailScroll + 1)
+	case "k", "up":
+		m.detailScroll = m.clampDetailScroll(m.detailScroll - 1)
+	case "g":
+		m.detailScroll = 0
+	case "G":
+		m.detailScroll = 1 << 30 // clamped to the last window below
+		m.detailScroll = m.clampDetailScroll(m.detailScroll)
 	}
 	return m, nil
 }
 
-// seedPicker points the calendar at whatever the Deadline field currently
-// says. A complete date wins; an empty field falls back to today. A partly
-// typed date is the one case that leaves the cursor alone — snapping back to
-// today on every keystroke would make the calendar jump around while you
-// type. Note parseDeadline reports an empty field as (nil, nil), a valid "no
-// deadline", so emptiness has to be checked separately from a parse failure.
+// clampDetailScroll keeps the detail body offset within [0, last window].
+func (m BoardModel) clampDetailScroll(offset int) int {
+	t, ok := m.selectedTask()
+	if !ok {
+		return 0
+	}
+	l := m.detailLayout(t, max(m.popupWidth()-2, 1))
+	return min(max(offset, 0), max(len(l.body)-l.window, 0))
+}
+
+// seedPicker points the calendar at the Deadline field's date, or today when
+// empty. A half-typed date leaves the cursor alone so it doesn't jump while
+// typing. parseDeadline returns (nil, nil) for empty, hence the text check.
 func (m *BoardModel) seedPicker() {
 	text := strings.TrimSpace(m.deadline.Value())
 	d, err := parseDeadline(text)
@@ -937,9 +1598,8 @@ func (m BoardModel) updateMove(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 	return m, nil
 }
 
-// shiftGrabbed moves the grabbed task one column over and follows it. It
-// reports whether anything actually moved, so a no-op press (at either end
-// of the board, or on a Move error) doesn't trigger a spurious dirty save.
+// shiftGrabbed moves the grabbed task one column over and follows it,
+// reporting whether it moved so a no-op press skips the save.
 func (m *BoardModel) shiftGrabbed(delta int) bool {
 	next := m.col + delta
 	if next < 0 || next >= len(m.board.Statuses()) {
@@ -950,7 +1610,7 @@ func (m *BoardModel) shiftGrabbed(delta int) bool {
 		return false
 	}
 	m.col = next
-	items := m.board.ByStatus(m.board.Statuses()[next])
+	items := m.visibleByStatus(m.board.Statuses()[next])
 	for i, t := range items {
 		if t.ID == m.grabID {
 			m.sel[next] = i
@@ -974,6 +1634,9 @@ func (m BoardModel) updateConfirm(k tea.KeyMsg) (BoardModel, tea.Cmd) {
 		m.err = err.Error()
 		return m, nil
 	}
+	if m.familyID == t.ID {
+		m.familyID = ""
+	}
 	m.clampSelection()
 	return m, dirty()
 }
@@ -992,7 +1655,7 @@ func (m *BoardModel) moveColumn(delta int) {
 
 // moveItem shifts the cursor within the focused column, clamped at both ends.
 func (m *BoardModel) moveItem(delta int) {
-	n := len(m.board.ByStatus(m.currentStatus()))
+	n := len(m.visibleByStatus(m.currentStatus()))
 	if n == 0 {
 		m.sel[m.col] = 0
 		return

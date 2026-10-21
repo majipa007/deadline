@@ -324,7 +324,11 @@ uninstall_gotodo() {
     "$HOME/.claude/skills/deadline" \
     "$HOME/.codex/skills/deadline" \
     "$HOME/.agents/skills/deadline" \
-    "$HOME/.config/opencode/skills/deadline"; do
+    "$HOME/.config/opencode/skills/deadline" \
+    "$HOME/.claude/skills/gotodo-task-board" \
+    "$HOME/.codex/skills/gotodo-task-board" \
+    "$HOME/.agents/skills/gotodo-task-board" \
+    "$HOME/.config/opencode/skills/gotodo-task-board"; do
     if [ -e "$dest" ]; then
       rm -rf "$dest"
       info "Removed $dest"
@@ -336,21 +340,68 @@ uninstall_gotodo() {
     awk '/^# added by deadline installer/ { pending=1; next } pending { pending=0; if (/^export PATH=/) next } { print }' "$rc" > "$tmp" && cat "$tmp" > "$rc"
     rm -f "$tmp"
   done
+  strip_deadline_block "$HOME/.claude/CLAUDE.md"
+  strip_deadline_block "$HOME/.codex/AGENTS.md"
+  info "Removed deadline workflow from global instruction files (if present)."
   info "Uninstall complete. Boards kept — delete ~/.config/gotodo and ./.deadline too for a full wipe."
+}
+
+# strip_deadline_block removes a previously installed deadline instruction
+# block (markers inclusive) from $1. Missing files are left alone.
+strip_deadline_block() {
+  local dest="$1" tmp
+  [ -f "$dest" ] || return 0
+  grep -q "deadline:begin" "$dest" || return 0
+  tmp="$(mktemp)"
+  awk '/deadline:begin/{skip=1; next} /deadline:end/{skip=0; next} !skip' "$dest" > "$tmp" \
+    && cat "$tmp" > "$dest"
+  rm -f "$tmp"
+}
+
+# install_global_instructions wires the deadline workflow into Claude Code
+# (~/.claude/CLAUDE.md) and Codex (~/.codex/AGENTS.md) unconditionally: both
+# auto-read their global instruction file every session, while a skill alone
+# is only invoked when the model happens to pick it. $1 is the cloned repo
+# root. Re-runs replace the old block instead of duplicating it.
+install_global_instructions() {
+  local src="$1/skills/gotodo-task-board/AGENTS.snippet.md"
+  [ -f "$src" ] || { warn "AGENTS snippet missing, skipping global instructions."; return 0; }
+  local dest
+  for dest in \
+    "$HOME/.claude/CLAUDE.md" \
+    "$HOME/.codex/AGENTS.md"; do
+    mkdir -p "$(dirname "$dest")"
+    [ -f "$dest" ] || touch "$dest"
+    strip_deadline_block "$dest"
+    if [ -s "$dest" ] && [ -n "$(tail -c 1 "$dest")" ]; then
+      printf '\n' >> "$dest"
+    fi
+    cat "$src" >> "$dest"
+    info "Wired deadline workflow into $dest"
+  done
 }
 
 # install_skill copies the agent skill into every well-known skills dir so
 # Claude Code, Codex, OpenCode and other Agent-Skills-compatible tools pick
 # it up without further setup. $1 is the cloned repo root.
 install_skill() {
-  local src="$1/skills/deadline/SKILL.md"
+  local src="$1/skills/gotodo-task-board/SKILL.md"
   [ -f "$src" ] || { warn "Skill source missing, skipping agent setup."; return 0; }
   local dest
+  # Remove the old generic skill name: leaving both installed gives agents
+  # two competing copies and lets stale instructions keep surfacing.
   for dest in \
-    "$HOME/.claude/skills/deadline/SKILL.md" \
-    "$HOME/.codex/skills/deadline/SKILL.md" \
-    "$HOME/.agents/skills/deadline/SKILL.md" \
-    "$HOME/.config/opencode/skills/deadline/SKILL.md"; do
+    "$HOME/.claude/skills/deadline" \
+    "$HOME/.codex/skills/deadline" \
+    "$HOME/.agents/skills/deadline" \
+    "$HOME/.config/opencode/skills/deadline"; do
+    rm -rf "$dest"
+  done
+  for dest in \
+    "$HOME/.claude/skills/gotodo-task-board/SKILL.md" \
+    "$HOME/.codex/skills/gotodo-task-board/SKILL.md" \
+    "$HOME/.agents/skills/gotodo-task-board/SKILL.md" \
+    "$HOME/.config/opencode/skills/gotodo-task-board/SKILL.md"; do
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
     info "Agent skill installed to $dest"
@@ -395,6 +446,7 @@ else
   chmod +x "$INSTALL_DIR/$BINARY"
 fi
 install_skill "$workdir/src"
+install_global_instructions "$workdir/src"
 trap - EXIT
 rm -rf "$workdir"
 

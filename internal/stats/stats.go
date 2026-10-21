@@ -1,5 +1,5 @@
-// Package stats computes board analytics. Every function takes an explicit
-// now so results are deterministic and testable.
+// Package stats computes board analytics. Functions take an explicit now so
+// results are deterministic.
 package stats
 
 import (
@@ -15,15 +15,14 @@ type DayCount struct {
 	N   int
 }
 
-// startOfDay truncates to midnight in t's own location. time.Truncate is
-// wrong here: it works on absolute time, not calendar days.
+// startOfDay truncates to midnight in t's own location (time.Truncate works
+// on absolute time, not calendar days).
 func startOfDay(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 }
 
-// Counts returns the number of tasks per column, with every column present
-// (zeroes included) so callers can render a stable row of tiles.
+// Counts returns the number of tasks per column, zeroes included.
 func Counts(tasks []task.Task, columns []task.Status) map[task.Status]int {
 	out := make(map[task.Status]int, len(columns))
 	for _, s := range columns {
@@ -37,9 +36,8 @@ func Counts(tasks []task.Task, columns []task.Status) map[task.Status]int {
 	return out
 }
 
-// CompletionsByDay buckets every completed task by the day it reached the
-// board's terminal column, as midnight in loc. Days with no completions are
-// absent rather than zero.
+// CompletionsByDay buckets completed tasks by the day (midnight in loc) they
+// reached the terminal column. Empty days are absent.
 func CompletionsByDay(tasks []task.Task, loc *time.Location, done task.Status) map[time.Time]int {
 	out := map[time.Time]int{}
 	for _, t := range tasks {
@@ -52,9 +50,7 @@ func CompletionsByDay(tasks []task.Task, loc *time.Location, done task.Status) m
 	return out
 }
 
-// DeadlinesByDay groups tasks by the calendar day they are due, as midnight
-// in loc. Tasks with no deadline are left out entirely; the caller decides
-// which statuses it cares about.
+// DeadlinesByDay groups tasks with a deadline by due day (midnight in loc).
 func DeadlinesByDay(tasks []task.Task, loc *time.Location) map[time.Time][]task.Task {
 	out := map[time.Time][]task.Task{}
 	for _, t := range tasks {
@@ -67,8 +63,8 @@ func DeadlinesByDay(tasks []task.Task, loc *time.Location) map[time.Time][]task.
 	return out
 }
 
-// ByDeadline returns the tasks that have a deadline, soonest first. Ties keep
-// board order, so a day's tasks read in the order they were added.
+// ByDeadline returns the tasks that have a deadline, soonest first; ties keep
+// board order.
 func ByDeadline(tasks []task.Task) []task.Task {
 	var out []task.Task
 	for _, t := range tasks {
@@ -96,9 +92,8 @@ func Throughput(tasks []task.Task, days int, now time.Time, done task.Status) []
 	return out
 }
 
-// Streak reports the current and longest run of consecutive days with at
-// least one completion. The current streak may end on yesterday, since today
-// is not over yet.
+// Streak reports the current and longest runs of consecutive days with a
+// completion. The current streak may end yesterday, since today isn't over.
 func Streak(tasks []task.Task, now time.Time, done task.Status) (current, longest int) {
 	byDay := CompletionsByDay(tasks, now.Location(), done)
 	if len(byDay) == 0 {
@@ -136,9 +131,8 @@ func Streak(tasks []task.Task, now time.Time, done task.Status) (current, longes
 	return current, longest
 }
 
-// TimeInStatus reconstructs how long a task has spent in each column by
-// replaying its transition history. Tasks in the terminal column stop
-// accruing time.
+// TimeInStatus replays a task's history to get time spent per column. The
+// terminal column does not accrue time.
 func TimeInStatus(t task.Task, now time.Time, done task.Status) map[task.Status]time.Duration {
 	out := map[task.Status]time.Duration{}
 	var cur task.Status
@@ -166,8 +160,7 @@ type CycleStats struct {
 	PerColumn map[task.Status]time.Duration // mean time per column, completed tasks only
 }
 
-// CycleTimes measures created-to-terminal-column duration over completed
-// tasks only.
+// CycleTimes measures created-to-terminal duration over completed tasks.
 func CycleTimes(tasks []task.Task, now time.Time, done task.Status) CycleStats {
 	out := CycleStats{PerColumn: map[task.Status]time.Duration{}}
 	var durations []time.Duration

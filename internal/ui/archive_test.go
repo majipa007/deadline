@@ -71,14 +71,14 @@ func TestArchiveViewShowsArchivedDate(t *testing.T) {
 
 func TestArchiveViewCountsEntries(t *testing.T) {
 	out := stripANSI(fixedArchive(archivedBoard(t)).View())
-	if !strings.Contains(out, "ARCHIVE (2)") {
+	if !strings.Contains(out, "Archive (2)") {
 		t.Errorf("View missing the ARCHIVE heading with its count:\n%s", out)
 	}
 }
 
 func TestArchiveViewEmptyState(t *testing.T) {
 	out := stripANSI(fixedArchive(&task.Board{}).View())
-	if !strings.Contains(out, "ARCHIVE") {
+	if !strings.Contains(out, "Archive (0)") {
 		t.Errorf("empty archive lost its heading:\n%s", out)
 	}
 	if !strings.Contains(out, "nothing archived yet") {
@@ -117,9 +117,7 @@ func TestArchiveSelectionSurvivesEmptyBoard(t *testing.T) {
 	}
 }
 
-// manyArchivedBoard returns a board with n archived tasks, each with no
-// description or deadline so every entry renders at a fixed, predictable
-// two-line height (title + "archived on" line).
+// manyArchivedBoard returns n archived tasks, each rendering two lines tall.
 func manyArchivedBoard(t *testing.T, n int) *task.Board {
 	t.Helper()
 	b := &task.Board{}
@@ -139,35 +137,32 @@ func manyArchivedBoard(t *testing.T, n int) *task.Board {
 	return b
 }
 
-// TestArchiveViewFitsWithinHeight ensures the archive page, like the board's
-// columns, never renders taller than the terminal in a short terminal with
-// many archived entries.
+// A long archive never renders taller than the terminal.
 func TestArchiveViewFitsWithinHeight(t *testing.T) {
 	m := NewArchiveModel(manyArchivedBoard(t, 6))
 	m.now = func() time.Time { return ref }
 	m.SetSize(100, 13)
 
+	// AppModel adds the one-row tab bar above the page.
 	out := stripANSI(m.View())
-	if got := len(strings.Split(out, "\n")); got > 13 {
-		t.Errorf("archive view is %d lines tall, want at most 13:\n%s", got, out)
+	if got := len(strings.Split(out, "\n")); got > 12 {
+		t.Errorf("archive view is %d lines tall, want at most 12 under the tab bar:\n%s", got, out)
 	}
 }
 
-// TestArchiveViewShowsMoreCount checks the "+N more" line appears with the
-// correct count when the archive's entries do not all fit.
+// Entries that don't fit are counted in a "+N more" line.
 func TestArchiveViewShowsMoreCount(t *testing.T) {
 	m := NewArchiveModel(manyArchivedBoard(t, 6))
 	m.now = func() time.Time { return ref }
 	m.SetSize(100, 13)
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "+3 more") {
-		t.Errorf("View missing '+3 more':\n%s", out)
+	if !strings.Contains(out, "+4 more") {
+		t.Errorf("View missing '+4 more':\n%s", out)
 	}
 }
 
-// TestArchiveViewNoMoreCountWhenEverythingFits ensures the "+N more" line is
-// absent once the terminal is tall enough to show every entry.
+// No "+N more" line when every entry fits.
 func TestArchiveViewNoMoreCountWhenEverythingFits(t *testing.T) {
 	m := NewArchiveModel(manyArchivedBoard(t, 6))
 	m.now = func() time.Time { return ref }
@@ -179,9 +174,7 @@ func TestArchiveViewNoMoreCountWhenEverythingFits(t *testing.T) {
 	}
 }
 
-// TestArchiveViewKeepsSelectedEntryVisibleBeyondFold ensures selecting the
-// last entry of a long archive still renders that entry, even though it
-// would fall past the fold in a naive top-down render.
+// Selecting the last entry of a long archive keeps it rendered.
 func TestArchiveViewKeepsSelectedEntryVisibleBeyondFold(t *testing.T) {
 	b := manyArchivedBoard(t, 6)
 	m := NewArchiveModel(b)
@@ -197,12 +190,8 @@ func TestArchiveViewKeepsSelectedEntryVisibleBeyondFold(t *testing.T) {
 	}
 }
 
-// TestArchiveViewMetaLineFitsNarrowWidth ensures the deadline/archived-on
-// meta line respects the same truncation budget as the title and
-// description, instead of overflowing the terminal. Archived tasks are
-// always Done, so DeadlineUrgency never reports UrgencyOverdue for them
-// (see task.DeadlineUrgency) — the deadline shown here is in the past but
-// renders without the "✗" marker.
+// The deadline/archived-on meta line truncates instead of overflowing a
+// narrow terminal.
 func TestArchiveViewMetaLineFitsNarrowWidth(t *testing.T) {
 	b := &task.Board{}
 	due := ref.AddDate(0, 0, -5)

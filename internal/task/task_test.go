@@ -112,7 +112,7 @@ func TestTaskJSONOmitsEmptyNewFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal returned %v", err)
 	}
-	for _, key := range []string{"description", "deadline", "archived", "archived_at"} {
+	for _, key := range []string{"parent_id", "description", "deadline", "archived", "archived_at"} {
 		if strings.Contains(string(data), key) {
 			t.Errorf("JSON contains %q for an empty field; want it omitted:\n%s", key, data)
 		}
@@ -130,7 +130,7 @@ func TestTaskJSONFromOlderVersionStillLoads(t *testing.T) {
 	if got.Title != "[Task title]" {
 		t.Errorf("Title = %q, want %q", got.Title, "[Task title]")
 	}
-	if got.Deadline != nil || got.Description != "" || got.Archived {
+	if got.ParentID != "" || got.Deadline != nil || got.Description != "" || got.Archived {
 		t.Errorf("new fields should be zero, got %+v", got)
 	}
 }

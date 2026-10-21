@@ -8,15 +8,11 @@ import (
 	"gotodo/internal/task"
 )
 
-// datePicker is the little month calendar shown under the Deadline field.
-// It holds only a cursor: the month on screen is whichever month the cursor
-// is in, so navigation and display can never disagree.
+// datePicker is the month calendar under the Deadline field. The month shown
+// is always the cursor's month.
 type datePicker struct {
-	// cursor is the selected calendar day, held at noon in its own location
-	// rather than midnight. DST transitions happen at day boundaries; noon
-	// leaves twelve hours of slack on each side, so no real-world transition
-	// can shift the stored instant onto the wrong calendar day the way
-	// midnight-anchored arithmetic can (see move).
+	// cursor is the selected day, held at noon so DST shifts (which happen
+	// near midnight) cannot move it onto another calendar day.
 	cursor time.Time
 	open   bool
 }
@@ -30,9 +26,8 @@ func newDatePicker(seed time.Time) datePicker {
 	}
 }
 
-// move shifts the cursor by whole days, rolling across months and years.
-// Starting from noon means AddDate cannot cross a DST transition mid-step;
-// re-anchoring the result back to noon keeps repeated moves from drifting.
+// move shifts the cursor by whole days, re-anchoring to noon so repeated
+// moves never drift.
 func (p datePicker) move(days int) datePicker {
 	moved := p.cursor.AddDate(0, 0, days)
 	y, m, d := moved.Date()
@@ -40,29 +35,27 @@ func (p datePicker) move(days int) datePicker {
 	return p
 }
 
-// sameDay reports whether a and b fall on the same calendar day in their
-// own locations, ignoring time of day.
+// sameDay reports whether a and b share a calendar day, each in its own
+// location.
 func sameDay(a, b time.Time) bool {
 	y1, m1, d1 := a.Date()
 	y2, m2, d2 := b.Date()
 	return y1 == y2 && m1 == m2 && d1 == d2
 }
 
-// daysInMonth is the length of the given month, leap years included. Day 0
-// of the following month is the last day of this one.
+// daysInMonth uses day 0 of the next month, which is this month's last day.
 func daysInMonth(year int, m time.Month) int {
 	return time.Date(year, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
 
-// monthGrid lays the cursor's month out as six Monday-first weeks. Cells
-// outside the month are the zero time, which the renderer draws as blank.
-// Six rows always suffice: the worst case is a 31-day month starting on a
-// Sunday, which needs 6 leading blanks plus 31 days — 37 of 42 cells.
+// monthGrid lays the cursor's month out as six Monday-first weeks; cells
+// outside the month are zero. Six rows fit the worst case (31 days from a
+// Sunday, 37 cells).
 func monthGrid(cursor time.Time) [6][7]time.Time {
 	var g [6][7]time.Time
 	loc := cursor.Location()
 	first := time.Date(cursor.Year(), cursor.Month(), 1, 0, 0, 0, 0, loc)
-	lead := (int(first.Weekday()) + 6) % 7 // Go puts Sunday at 0; we want Monday at 0.
+	lead := (int(first.Weekday()) + 6) % 7 // Monday-first; Go's Weekday starts at Sunday
 
 	for d := 1; d <= daysInMonth(cursor.Year(), cursor.Month()); d++ {
 		i := lead + d - 1
@@ -74,16 +67,8 @@ func monthGrid(cursor time.Time) [6][7]time.Time {
 // pickerWidth is the rendered width: seven cells of four columns each.
 const pickerWidth = 28
 
-// View renders the month as a Monday-first grid, through the shared
-// monthView layout. today is passed in rather than read from the clock so
-// tests stay deterministic.
-//
-// Every cell is exactly four columns, so the brackets around the selected
-// day occupy space the cell already owns and cannot shift a row out of line
-// with the header.
-//
-// The two markers are independent and can land on the same cell: today is
-// always green, and the selected day is always bracketed.
+// View renders the picker; today is a parameter so tests stay
+// deterministic. Today is green and the cursor is bracketed, possibly both.
 func (p datePicker) View(today time.Time) string {
 	return monthView(p.cursor, func(day time.Time) (string, lipgloss.Style) {
 		text := fmt.Sprintf(" %2d ", day.Day())

@@ -32,7 +32,7 @@ func TestDevBoardWarnsWhenTooNarrow(t *testing.T) {
 	m := NewBoardModel(&task.Board{Columns: task.DevColumns})
 	m.SetSize(80, 40)
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "terminal too narrow") {
+	if !strings.Contains(out, "Terminal too narrow") {
 		t.Errorf("80-column dev view should warn, got:\n%s", out)
 	}
 }

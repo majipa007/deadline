@@ -29,8 +29,7 @@ func calendarPage(b *task.Board, w, h int) CalendarModel {
 	return m
 }
 
-// Every cell must be four columns, or the grid stops lining up with the
-// weekday header — the invariant monthView's callers all depend on.
+// Every row must be pickerWidth columns so weeks line up with the header.
 func TestMonthViewRowsAreAllTheSameWidth(t *testing.T) {
 	out := monthView(ref, func(day time.Time) (string, lipgloss.Style) {
 		return " 99 ", lipgloss.NewStyle()
@@ -48,9 +47,9 @@ func TestMonthViewRowsAreAllTheSameWidth(t *testing.T) {
 
 func TestMonthsAcrossFitsTheWidth(t *testing.T) {
 	cases := []struct{ width, max, want int }{
-		{0, 3, 2},   // unknown width falls back to 80 columns
-		{80, 3, 2},  // 2*28 + 3 = 59 fits, 3 would need 90
-		{90, 3, 3},  //
+		{0, 3, 2},  // unknown width falls back to 80 columns
+		{80, 3, 2}, // 2*28 + 3 = 59 fits, 3 would need 90
+		{90, 3, 3},
 		{200, 3, 3}, // capped at max
 		{20, 3, 1},  // never fewer than one
 	}
@@ -187,12 +186,8 @@ func TestCalendarPagesThroughMonths(t *testing.T) {
 	}
 }
 
-// The list is what gives when the terminal is short: the page must stay
-// inside the frame however many deadlines there are. 15 rows is the floor
-// this can hold — the tab bar, two headings, the legend, the two-row help
-// footer and one list row around a strip that is 8 rows tall in a month
-// spanning six weeks. Below that the strip alone overflows, and no list
-// arithmetic can help.
+// The upcoming list shrinks so the page fits the terminal. 15 rows is the
+// floor: below that the month strip alone overflows.
 func TestCalendarPageNeverExceedsTerminalHeight(t *testing.T) {
 	offsets := make([]int, 0, 40)
 	for i := 0; i < 40; i++ {
@@ -225,16 +220,15 @@ func TestTabReachesTheCalendarPage(t *testing.T) {
 	if a.page != pageCalendar {
 		t.Fatalf("page = %v, want pageCalendar after three tabs", a.page)
 	}
-	if out := stripANSI(a.View()); !strings.Contains(out, "DEADLINES") {
+	if out := stripANSI(a.View()); !strings.Contains(out, "Deadlines") {
 		t.Errorf("calendar page did not render:\n%s", out)
 	}
 }
 
 // --- streak calendar ---
 
-// The shading is asserted on the cell function rather than on the rendered
-// page: "20" also appears inside "2026" in every month title, so scanning
-// the output for a day number matches a heading first.
+// Asserted on the cell, not the page: a day like "20" also matches "2026"
+// in month titles.
 func TestCompletionCellShadesByCount(t *testing.T) {
 	quiet := task.StartOfDay(ref.AddDate(0, 0, -10))
 	busy := task.StartOfDay(ref.AddDate(0, 0, -1))
@@ -254,8 +248,6 @@ func TestCompletionCellShadesByCount(t *testing.T) {
 	if got := mark(empty); got != ' ' {
 		t.Errorf("a day with no completions is marked %q, want blank", got)
 	}
-	// Today is underlined, not recoloured: green stays free to mean
-	// "you finished something".
 	if _, style := cell(task.StartOfDay(ref)); !style.GetUnderline() {
 		t.Error("today is not underlined on the streak calendar")
 	}
@@ -276,14 +268,12 @@ func TestStreakRendersMonthGridsWithCompletions(t *testing.T) {
 	m.SetSize(110, 40)
 	out := stripANSI(m.View())
 
-	for _, want := range []string{"STREAK", "May 2026", "June 2026", "July 2026"} {
+	for _, want := range []string{"Streak", "May 2026", "June 2026", "July 2026"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("streak calendar is missing %q:\n%s", want, out)
 		}
 	}
-	// 29/07 had two completions, the busiest day on screen, so its cell
-	// carries the top shade. TestCompletionCellShadesByCount covers the
-	// rest of the scale.
+	// 29/07 had two completions, the busiest day, so it gets the top shade.
 	if !strings.Contains(out, string(heatRunes[4])+"29") {
 		t.Errorf("the busiest day is not shaded at full strength:\n%s", out)
 	}

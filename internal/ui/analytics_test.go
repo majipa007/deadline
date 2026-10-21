@@ -9,12 +9,8 @@ import (
 	"gotodo/internal/task"
 )
 
-// numericFields extracts just the numeric tokens from a rendered line, in
-// order. StatTileStyle draws bordered, centered tiles, so a raw
-// strings.Fields split on the tile-count row also picks up border glyphs
-// (│) as their own tokens; filtering to digit-only tokens gets at the
-// actual counts without weakening what's being checked — order and value
-// of all four counts are still pinned exactly.
+// numericFields returns the digit-only tokens of a line, in order, skipping
+// the tile border glyphs.
 func numericFields(line string) []string {
 	var out []string
 	for _, f := range strings.Fields(line) {
@@ -54,7 +50,7 @@ func fixedAnalytics(b *task.Board) AnalyticsModel {
 
 func TestAnalyticsViewHasAllSections(t *testing.T) {
 	out := fixedAnalytics(analyticsBoard(t)).View()
-	for _, want := range []string{"THROUGHPUT", "CYCLE TIME", "BLOCKED", "STREAK"} {
+	for _, want := range []string{"Throughput", "Cycle time", "Blocked", "Streak"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("View missing section %q:\n%s", want, out)
 		}
@@ -115,24 +111,14 @@ func TestAnalyticsTilesExcludeArchivedButHistoryDoesNot(t *testing.T) {
 		t.Errorf("tile counts = %v, want the DONE tile to read 0", got)
 	}
 
-	// But history-based sections must still count the completion. Note:
-	// this can't be checked via the THROUGHPUT line's 14-day window —
-	// SweepArchive only fires at >=14 days since completion, and the
-	// throughput window only covers the 14 most recent days, so an
-	// archived task's completion date can never fall inside it (the two
-	// 14-day constants are mutually exclusive by construction). Cycle
-	// time has no such window, so it's the meaningful check here.
+	// History still counts it. Checked via cycle time: an archived
+	// completion is always outside the 14-day throughput window.
 	if !strings.Contains(out, "over 1 completed") {
 		t.Errorf("archiving erased the completion from cycle time:\n%s", out)
 	}
 }
 
-// TestAnalyticsViewRendersTruthfulNumbers builds a fixed board and checks the
-// rendered figures against hand-computed expectations, rather than the
-// section-heading Contains checks above (which a hardcoded-string stub of
-// View would also pass). The expected values below are computed by hand from
-// the fixture, never by calling into internal/stats — otherwise this would
-// just assert the renderer against itself.
+// Rendered figures match hand-computed values (not internal/stats output).
 func TestAnalyticsViewRendersTruthfulNumbers(t *testing.T) {
 	b := &task.Board{}
 
@@ -148,9 +134,8 @@ func TestAnalyticsViewRendersTruthfulNumbers(t *testing.T) {
 		t.Fatalf("Move returned %v", err)
 	}
 
-	// Cycle times 1h, 1h, 25h -> mean 9h, median 1h (hand-computed:
-	// sum=27h/3=9h; sorted [1h,1h,25h], odd count -> middle element 1h).
-	// Completed on three consecutive days so streak current=3, longest=3.
+	// Cycle times 1h, 1h, 25h -> mean 9h, median 1h; three consecutive
+	// days -> streak current=3, longest=3.
 	d1 := b.Add("[Done today]", "", nil, ref.Add(-1*time.Hour)).ID
 	if err := b.Move(d1, task.StatusDone, ref); err != nil {
 		t.Fatalf("Move returned %v", err)
@@ -185,14 +170,13 @@ func TestAnalyticsViewRendersTruthfulNumbers(t *testing.T) {
 
 	// Throughput: 3 completions, all within the 14-day window, spanning
 	// 17/07/2026 (14 days before 30/07/2026) through 30/07/2026.
-	if !strings.Contains(out, "3 completed over 14 days · 17/07/2026 → 30/07/2026") {
-		t.Errorf("throughput line wrong, want '3 completed over 14 days · 17/07/2026 → 30/07/2026':\n%s", out)
+	if !strings.Contains(out, "3 completed in 14 days, 17/07/2026 to 30/07/2026") {
+		t.Errorf("throughput line wrong, want '3 completed in 14 days, 17/07/2026 to 30/07/2026':\n%s", out)
 	}
 
-	// Cycle time: mean 9h, median 1h over 3 completed tasks. Pinning both
-	// separately catches a Mean/Median swap in renderCycle.
-	if !strings.Contains(out, "mean 9h · median 1h · over 3 completed") {
-		t.Errorf("cycle time line wrong, want 'mean 9h · median 1h · over 3 completed':\n%s", out)
+	// Pinning both catches a Mean/Median swap.
+	if !strings.Contains(out, "mean 9h   median 1h   over 3 completed") {
+		t.Errorf("cycle time line wrong, want 'mean 9h   median 1h   over 3 completed':\n%s", out)
 	}
 
 	// Blocked: 1 task, blocked for 9h.
@@ -204,19 +188,13 @@ func TestAnalyticsViewRendersTruthfulNumbers(t *testing.T) {
 	}
 
 	// Streak: completions on three consecutive days ending today.
-	if !strings.Contains(out, "current 3 days · longest 3 days") {
-		t.Errorf("streak line wrong, want 'current 3 days · longest 3 days':\n%s", out)
+	if !strings.Contains(out, "current 3 days   longest 3 days") {
+		t.Errorf("streak line wrong, want 'current 3 days   longest 3 days':\n%s", out)
 	}
 }
 
-// TestAnalyticsArchivedBlockedTaskExcludedButCycleTimeStillCounts pins the
-// fix for an archived-but-hand-edited task: an archived blocked task must
-// not show up in the BLOCKED section (that's a present-tense claim about
-// the live board), while an archived done task must still count toward
-// CYCLE TIME (that's a history claim, and archiving must never erase
-// history). Asserting both together stops a "fix" that filters every
-// section down to Active(), which would silently break the cycle-time
-// invariant covered by TestAnalyticsTilesExcludeArchivedButHistoryDoesNot.
+// Archived tasks leave BLOCKED (live view) but still count in CYCLE TIME
+// (history).
 func TestAnalyticsArchivedBlockedTaskExcludedButCycleTimeStillCounts(t *testing.T) {
 	b := &task.Board{}
 
@@ -229,11 +207,7 @@ func TestAnalyticsArchivedBlockedTaskExcludedButCycleTimeStillCounts(t *testing.
 		t.Fatalf("Move returned %v", err)
 	}
 
-	// Simulate a hand-edited tasks.json with archived:true set on a
-	// blocked task — not reachable through the UI, since SweepArchive
-	// only archives done tasks, but the codebase already defends against
-	// hand-edited files elsewhere (Load's status coercion, archivedStamp's
-	// fallback).
+	// Simulate a hand-edited file: SweepArchive never archives blocked tasks.
 	for i := range b.Tasks {
 		if b.Tasks[i].ID == blocked || b.Tasks[i].ID == done {
 			b.Tasks[i].Archived = true
@@ -258,13 +232,12 @@ func TestAnalyticsViewEmptyBoardDoesNotPanic(t *testing.T) {
 	if out == "" {
 		t.Error("View of an empty board returned an empty string")
 	}
-	if !strings.Contains(out, "THROUGHPUT") {
+	if !strings.Contains(out, "Throughput") {
 		t.Errorf("View of an empty board is missing its sections:\n%s", out)
 	}
 }
 
-// Cycle bars stretch with the terminal instead of a fixed 24 cells, so the
-// section holds its own next to a full-width board.
+// Cycle bars stretch with the terminal width.
 func TestCycleBarsScaleWithTerminalWidth(t *testing.T) {
 	m := NewAnalyticsModel(&task.Board{})
 	if got := m.barWidth(); got != 24 {

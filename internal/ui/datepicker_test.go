@@ -104,9 +104,7 @@ func TestMonthGridPlacesDaysMondayFirst(t *testing.T) {
 	}
 }
 
-// TestMonthGridCoversEveryDayWithoutDuplicates checks membership and
-// uniqueness only, not cell position — TestMonthGridPlacesDaysMondayFirst
-// and the fixed-index tests below pin the actual Monday-first layout.
+// Membership and uniqueness only; position is pinned by the tests around it.
 func TestMonthGridCoversEveryDayWithoutDuplicates(t *testing.T) {
 	g := monthGrid(day(2026, time.August, 9))
 	seen := map[int]int{}
@@ -132,14 +130,12 @@ func TestMonthGridCoversEveryDayWithoutDuplicates(t *testing.T) {
 }
 
 func TestMonthGridFitsAMonthStartingSunday(t *testing.T) {
-	// 01/02/2026 is a Sunday — the largest possible lead for a Monday-first
-	// grid, pushing the 1st all the way into column 6.
+	// 01/02/2026 is a Sunday: the largest lead, so the 1st sits in column 6.
 	g := monthGrid(day(2026, time.February, 1))
 	if !g[0][6].Equal(day(2026, time.February, 1)) {
 		t.Errorf("g[0][6] = %v, want 01/02/2026", g[0][6])
 	}
-	// Lead 6 plus 28 days ends at index 33, so the last day sits at row 4,
-	// column 5. 28/02/2026 is a Saturday, not a Sunday.
+	// Lead 6 + 28 days ends at index 33: row 4, column 5 (a Saturday).
 	if !g[4][5].Equal(day(2026, time.February, 28)) {
 		t.Errorf("g[4][5] = %v, want 28/02/2026 in the last populated cell", g[4][5])
 	}
@@ -153,9 +149,8 @@ func TestMoveAcrossTheSantiagoDSTTransitionLandsOnTheNextDay(t *testing.T) {
 	if err != nil {
 		t.Skip("tzdata for America/Santiago not available:", err)
 	}
-	// Chile's clocks jump forward at midnight on this date: 2016-08-13 00:00
-	// does not exist as a stable instant there. AddDate from a midnight
-	// cursor can land back on the 13th at 23:00 instead of on the 14th.
+	// Chile's clocks jump forward at midnight here; midnight-based AddDate
+	// can land on the 13th at 23:00 instead of the 14th.
 	seed := time.Date(2016, time.August, 13, 0, 0, 0, 0, loc)
 	p := newDatePicker(seed).move(1)
 	if y, m, d := p.cursor.Date(); !(y == 2016 && m == time.August && d == 14) {
@@ -164,8 +159,7 @@ func TestMoveAcrossTheSantiagoDSTTransitionLandsOnTheNextDay(t *testing.T) {
 }
 
 func TestMonthGridHandlesTheSixRowWorstCase(t *testing.T) {
-	// A 31-day month starting on a Sunday needs all six rows: lead 6 plus
-	// 31 days ends at index 36, which is row 5.
+	// Lead 6 + 31 days ends at index 36, the sixth row.
 	g := monthGrid(day(2026, time.March, 1)) // 01/03/2026 is a Sunday
 	if !g[0][6].Equal(day(2026, time.March, 1)) {
 		t.Errorf("g[0][6] = %v, want 01/03/2026", g[0][6])
@@ -201,8 +195,8 @@ func TestPickerViewHasOneCursorOnly(t *testing.T) {
 }
 
 func TestPickerViewRowsAllHaveTheSameWidth(t *testing.T) {
-	// The cursor marker must not widen its row. Put the cursor on a day in
-	// the middle of a full week so any extra column would show up.
+	// The cursor brackets must not widen its row; mid-week makes any extra
+	// column show.
 	out := newDatePicker(day(2026, time.August, 12)).View(day(2026, time.August, 1))
 	lines := strings.Split(out, "\n")
 

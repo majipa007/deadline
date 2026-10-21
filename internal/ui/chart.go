@@ -9,7 +9,6 @@ import (
 var sparkRunes = []rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
 
 // heatRunes index 0 is "nothing happened"; 1..4 are increasing intensity.
-// The calendar shades a day's cell with 1..4 and draws a blank for 0.
 var heatRunes = []rune{'·', '▁', '▄', '▓', '█'}
 
 // Sparkline renders one block rune per value, scaled to the series max.

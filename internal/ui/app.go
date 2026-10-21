@@ -65,13 +65,11 @@ func archiveTick() tea.Cmd {
 	return tea.Tick(time.Hour, func(t time.Time) tea.Msg { return archiveTickMsg(t) })
 }
 
-// refreshInterval is how often an open board looks for writes from other
-// sessions. Two seconds keeps an agent's cards appearing live without any
-// measurable cost: it is one stat call when nothing changed.
+// refreshInterval is how often an open board polls for writes from other
+// sessions; it costs one stat call when nothing changed.
 const refreshInterval = 2 * time.Second
 
-// refreshTickMsg fires on that interval so an open board picks up headless
-// writes (agents logging in parallel) without any keypress.
+// refreshTickMsg fires every refreshInterval to pick up headless writes.
 type refreshTickMsg time.Time
 
 func refreshTick() tea.Cmd {
@@ -103,8 +101,12 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case archiveTickMsg:
+		selected := ""
+		if t, ok := m.board.selectedTask(); ok {
+			selected = t.ID
+		}
 		if m.store.SweepArchive(m.now()) > 0 {
-			m.board.clampSelection()
+			m.board.reconcileFamily(selected)
 			return m, tea.Batch(dirty(), archiveTick())
 		}
 		return m, archiveTick()
@@ -112,19 +114,19 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshTickMsg:
 		// Re-arm first: every path below must keep polling.
 		cmd := refreshTick()
-		// Only refresh over a clean, non-modal board. Unsaved keystrokes
-		// (dirty) or an open form/move/confirm/detail must never be
-		// yanked away mid-interaction; the next tick retries instead.
+		// Only reload a clean, non-modal board so nothing mid-edit is lost;
+		// the next tick retries otherwise.
 		if m.board.mode == modeNormal && !m.store.Dirty() {
 			if changed, _ := m.boardChanged(); changed {
-				// Clean means memory holds nothing the disk lacks, so a
-				// wholesale reload drops nothing of ours. Tombstones are
-				// carried over so a concurrently re-saved deleted task is
-				// not merged back on the next Save.
+				selected := ""
+				if t, ok := m.board.selectedTask(); ok {
+					selected = t.ID
+				}
+				// Clean, so a wholesale reload loses nothing; keep tombstones.
 				if fresh, err := task.Load(m.store.Path()); err == nil {
 					fresh.CarryTombstonesFrom(m.store)
 					*m.store = *fresh
-					m.board.clampSelection()
+					m.board.reconcileFamily(selected)
 					m.noteBoardStat()
 				}
 			}
@@ -132,19 +134,13 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
-		// Every non-normal board mode is modal with respect to the global
-		// keys: modeInput is text entry, modeConfirm and modeMove each
-		// advertise their own q/tab-shaped footer (e.g. "y / n",
-		// "enter drop · esc cancel") that would otherwise be preempted.
-		// Only ctrl+c is global regardless of mode.
+		// Non-normal board modes own their keys; only ctrl+c is always global.
 		typing := m.page == pageBoard && m.board.mode != modeNormal
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
-		// Bubbletea coalesces bytes from a single read into one KeyRunes
-		// message when keys arrive faster than we consume them (held-down
-		// navigation keys, fast typing, paste). Split multi-rune messages
-		// into one KeyMsg per rune so every keypress is still handled.
+		// Bubbletea coalesces fast input (held keys, paste) into one
+		// KeyRunes message; replay it one rune at a time.
 		if msg.Type == tea.KeyRunes && len(msg.Runes) > 1 {
 			var cmds []tea.Cmd
 			var next tea.Model = m
@@ -196,31 +192,30 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View renders the tab bar above the active page, or the help overlay.
-// The bar names the pages; the way out is a footer hint on each page
-// ("tab switch"), next to the keys that live there.
+// View renders the tab bar above the active page or the help overlay.
 func (m AppModel) View() string {
-	if m.showHelp {
-		return m.renderHelp()
-	}
-	body := m.board.View()
-	switch m.page {
-	case pageAnalytics:
+	var body string
+	switch {
+	case m.showHelp:
+		body = m.renderHelp()
+	case m.page == pageAnalytics:
 		body = m.analytics.View()
-	case pageArchive:
+	case m.page == pageArchive:
 		body = m.archive.View()
-	case pageCalendar:
+	case m.page == pageCalendar:
 		body = m.calendar.View()
+	default:
+		body = m.board.View()
 	}
-	parts := []string{m.renderTabs(), body}
+	// A save error rides on the tab bar row, so it costs no page any height.
+	tabs := m.renderTabs()
 	if m.saveErr != "" {
-		parts = append(parts, HelpStyle.Render("save failed: "+m.saveErr))
+		tabs += "  " + errorLine(truncate("save failed: "+m.saveErr, max(m.width-lipgloss.Width(tabs)-4, 10)))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	return lipgloss.JoinVertical(lipgloss.Left, tabs, body)
 }
 
-// noteBoardStat records the board file as currently on disk. Called after
-// every save and refresh so the next tick compares against fresh state.
+// noteBoardStat records the board file's current mtime and size.
 func (m *AppModel) noteBoardStat() {
 	if st, err := os.Stat(m.store.Path()); err == nil {
 		m.boardMod, m.boardSize = st.ModTime(), st.Size()
@@ -241,10 +236,12 @@ func (m AppModel) boardChanged() (bool, error) {
 }
 
 func (m AppModel) renderTabs() string {
-	active := lipgloss.NewStyle().Bold(true).Foreground(ColAccent).Padding(0, 2)
+	// Active tab is a filled accent chip.
+	active := lipgloss.NewStyle().Bold(true).Padding(0, 2).
+		Foreground(lipgloss.AdaptiveColor{Light: "#ffffff", Dark: "#1a1b26"}).Background(ColAccent)
 	inactive := MutedStyle.Copy().Padding(0, 2)
 
-	names := [pageCount]string{"BOARD", "ANALYTICS", "ARCHIVE", "CALENDAR"}
+	names := [pageCount]string{"Board", "Analytics", "Archive", "Calendar"}
 	tabs := make([]string, 0, len(names))
 	for i, n := range names {
 		if page(i) == m.page {
@@ -256,32 +253,60 @@ func (m AppModel) renderTabs() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 
-func (m AppModel) renderHelp() string {
-	rows := [][2]string{
-		{"tab", "cycle board → analytics → archive → calendar"},
-		{"ctrl+t", "toggle column / item focus"},
-		{"h l", "previous / next column"},
-		{"j k", "previous / next task (item focus)"},
-		{"g G", "first / last task in column"},
-		{"enter", "expand the selected task in a popup (e edit, d delete, esc close)"},
-		{"a", "add a task"},
-		{"e", "edit the selected task"},
-		{"d", "delete the selected task (confirms)"},
-		{"ctrl+j", "new line, while writing a description"},
-		{"deadline", "a calendar opens with the field; hjkl to move, t for today"},
-		{"m", "grab the task, then h/l to move, enter to drop, esc to cancel"},
-		{"?", "toggle this help"},
-		{"q", "quit"},
-		{"", ""},
-		{"calendar", "every deadline on a month grid; h/l changes month, t back to today"},
-		{"deadlines", "green >3 days · amber ≤3 · red ≤1 · red ✗ overdue"},
-	}
-	lines := []string{TitleStyle.Render("KEYS"), ""}
+// helpSection renders one titled group of help rows.
+func helpSection(title string, rows [][2]string) string {
+	key := lipgloss.NewStyle().Bold(true).Foreground(ColAccent).Width(9)
+	lines := []string{TitleStyle.Render(title)}
 	for _, r := range rows {
-		lines = append(lines,
-			lipgloss.NewStyle().Foreground(ColAccent).Width(10).Render(r[0])+
-				MutedStyle.Render(r[1]))
+		lines = append(lines, key.Render(r[0])+MutedStyle.Render(r[1]))
 	}
-	lines = append(lines, "", MutedStyle.Render("any key to close"))
-	return ColumnStyle.Render(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
+}
+
+// renderHelp is the key reference panel: two columns when wide, stacked when narrow.
+func (m AppModel) renderHelp() string {
+	left := helpSection("Navigation", [][2]string{
+		{"tab", "next page"},
+		{"h l", "previous / next column"},
+		{"j k", "previous / next task"},
+		{"g G", "first / last in column"},
+		{"ctrl+t", "column / item focus"},
+		{"enter", "open the selected task"},
+	}) + "\n\n" + helpSection("Tasks", [][2]string{
+		{"a", "add a task"},
+		{"s", "add a subtask"},
+		{"e", "edit the selected task"},
+		{"d", "delete (asks first)"},
+		{"m", "grab, h/l move, enter drop"},
+		{"f", "show only this family"},
+	})
+	urgency := func(u task.Urgency, s string) string {
+		return lipgloss.NewStyle().Foreground(UrgencyColor(u)).Render("● " + s)
+	}
+	right := helpSection("Form", [][2]string{
+		{"tab", "next field"},
+		{"ctrl+j", "new line in description"},
+		{"deadline", "hjkl pick a day, t today"},
+		{"worktree", "path or branch, optional"},
+		{"parent", "type to filter, ↑/↓ enter"},
+		{"enter", "save, esc cancel"},
+	}) + "\n\n" + helpSection("Pages", [][2]string{
+		{"archive", "j/k select"},
+		{"calendar", "h/l month, t today"},
+		{"? q", "this help, quit"},
+	}) + "\n\n" + helpSection("Deadlines", [][2]string{
+		{urgency(task.UrgencyFuture, "green"), "more than 3 days left"},
+		{urgency(task.UrgencySoon, "amber"), "3 days or fewer"},
+		{urgency(task.UrgencyUrgent, "red"), "1 day or fewer, or late"},
+	})
+
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, "   ", right)
+	if lipgloss.Width(body)+4 > m.width && m.width > 0 {
+		body = left + "\n\n" + right
+	}
+	w := lipgloss.Width(body)
+	rows := append([]string{TitleStyle.Render("Keys"), MutedStyle.Render(strings.Repeat("─", w)), body},
+		popupFoot(w, keyHint("any key", "Close"))...)
+	panel := ColumnStyle.Render(strings.Join(rows, "\n"))
+	return m.board.overlay(panel)
 }

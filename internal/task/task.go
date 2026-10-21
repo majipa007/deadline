@@ -16,22 +16,20 @@ const (
 	StatusBlocked Status = "blocked"
 	StatusDone    Status = "done"
 
-	// Development preset columns. Both presets share the first (todo)
-	// and blocked columns; only the middle and terminal columns differ.
+	// Development preset columns (todo and blocked are shared).
 	StatusInDev         Status = "indev"
 	StatusTestingReview Status = "testing-review"
 	StatusShipped       Status = "shipped"
 )
 
-// Statuses lists the personal columns in left-to-right board order. It is
-// the default for boards whose file predates per-board columns.
+// Statuses lists the personal columns in board order; also the default for
+// files without stored columns.
 var Statuses = []Status{StatusTodo, StatusDoing, StatusBlocked, StatusDone}
 
 // PersonalColumns is the default preset: a short personal board.
 var PersonalColumns = Statuses
 
-// DevColumns is the development preset: review and testing share one
-// TESTING/REVIEW stage, whose terminal column is shipped instead of done.
+// DevColumns is the development preset, ending in shipped instead of done.
 var DevColumns = []Status{StatusTodo, StatusInDev, StatusTestingReview, StatusBlocked, StatusShipped}
 
 // Label is the human-readable column heading.
@@ -65,9 +63,11 @@ type Transition struct {
 // Task is one card on the board.
 type Task struct {
 	ID          string       `json:"id"`
+	ParentID    string       `json:"parent_id,omitempty"`
 	Title       string       `json:"title"`
 	Description string       `json:"description,omitempty"`
 	Deadline    *time.Time   `json:"deadline,omitempty"`
+	Worktree    string       `json:"worktree,omitempty"` // git worktree path or branch the work lives in
 	Status      Status       `json:"status"`
 	CreatedAt   time.Time    `json:"created_at"`
 	UpdatedAt   time.Time    `json:"updated_at"`
@@ -76,8 +76,7 @@ type Task struct {
 	History     []Transition `json:"history,omitempty"`
 }
 
-// NewTask builds a task in the todo column with a fresh random ID. A nil
-// deadline means the task has none; description may be empty.
+// NewTask builds a todo task with a fresh random ID; deadline may be nil.
 func NewTask(title, description string, deadline *time.Time, now time.Time) Task {
 	return Task{
 		ID:          newID(),
@@ -93,18 +92,15 @@ func NewTask(title, description string, deadline *time.Time, now time.Time) Task
 func newID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand.Read does not fail on any supported platform; a
-		// timestamp-based fallback here would hex-encode ASCII digits and
-		// collide for any two Adds in the same microsecond. An honest crash
-		// beats silently minting colliding IDs.
+		// Never fails on supported platforms; crash rather than mint
+		// colliding IDs.
 		panic(err)
 	}
 	return hex.EncodeToString(b)
 }
 
-// CompletedAt reports when the task last entered the board's terminal
-// column (done/shipped). ok is false unless the task is currently there,
-// so reopened tasks are not counted as completions.
+// CompletedAt reports when the task last entered the terminal column. ok is
+// false unless it is still there, so reopened tasks don't count.
 func CompletedAt(t Task, done Status) (time.Time, bool) {
 	if t.Status != done {
 		return time.Time{}, false

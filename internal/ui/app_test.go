@@ -30,7 +30,7 @@ func TestTabSwitchesPages(t *testing.T) {
 	if a.page != pageAnalytics {
 		t.Fatalf("page = %v, want pageAnalytics", a.page)
 	}
-	if !strings.Contains(a.View(), "THROUGHPUT") {
+	if !strings.Contains(a.View(), "Throughput") {
 		t.Errorf("analytics page view missing THROUGHPUT:\n%s", a.View())
 	}
 
@@ -283,7 +283,7 @@ func TestArchivePageRenders(t *testing.T) {
 		m, _ := a.Update(tea.KeyMsg{Type: tea.KeyTab})
 		a = m.(AppModel)
 	}
-	if !strings.Contains(stripANSI(a.View()), "ARCHIVE") {
+	if !strings.Contains(stripANSI(a.View()), "Archive (") {
 		t.Errorf("archive page did not render:\n%s", a.View())
 	}
 }
@@ -348,10 +348,7 @@ func TestArchiveTickWithNothingToDoStillReschedules(t *testing.T) {
 	}
 }
 
-// TestArchiveTickClampsBoardSelection covers a carried review item: sweeping
-// can shrink the done column out from under the board's cursor. Without a
-// clamp, one frame renders with the cursor pointing past the end of the
-// (now shorter) column.
+// A sweep that shrinks the done column keeps the cursor in range.
 func TestArchiveTickClampsBoardSelection(t *testing.T) {
 	b := &task.Board{}
 	doneIdx := -1
@@ -383,23 +380,8 @@ func TestArchiveTickClampsBoardSelection(t *testing.T) {
 	}
 }
 
-// TestViewNeverExceedsTerminalHeight is the whole-frame check the 25 tests
-// added alongside the date picker were missing: every component test below
-// this one checks renderForm() or picker.View() in isolation, and none of
-// them notice that stacking the tab bar, the board, and a form with the
-// calendar open overflows the real terminal. Bubbletea's altscreen renderer
-// does not clip vertically, so an overflow here means the top of the board
-// scrolls off screen while the picker is open — exactly when the user needs
-// to see the board they're picking a date for.
-//
-// The matrix runs down to 15 rows, well below a normal terminal (a tmux
-// split pane is an ordinary way to land there), because the bug scaled with
-// how little room the footer left, not with any one fixed height.
-//
-// The form is now a centred popup rather than a footer, so it no longer
-// squeezes the board at all — but it can still overflow on its own, which is
-// what formRows() shrinks the description box and drops the calendar to
-// prevent. Nothing here is allowed to exceed the terminal.
+// The whole frame fits the terminal in every form state, down to 15 rows;
+// the altscreen renderer does not clip, so overflow scrolls the board away.
 func TestViewNeverExceedsTerminalHeight(t *testing.T) {
 	for _, h := range []int{15, 18, 20, 23, 24, 40, 50} {
 		a := NewApp(seeded(t))
@@ -419,12 +401,7 @@ func TestViewNeverExceedsTerminalHeight(t *testing.T) {
 
 		normal := a
 		check("normal", normal)
-		// Item 2 regression guard: normal mode must not lose a row of board
-		// space to an over-cautious reserve. footerRows is 2 in normal mode
-		// (HelpStyle has PaddingTop(1)), so the pre-fix hard-coded "-6"
-		// budget rendered a frame of height-1 rows; the fixed reserve must
-		// still land there, not shrink the board to claim extra headroom
-		// it doesn't need.
+		// Normal mode must not give up board rows to an over-cautious reserve.
 		if got := lipgloss.Height(normal.View()); got < h-1 {
 			t.Errorf("height=%d: normal mode uses only %d rows, want at least %d (regression: the board lost a row)", h, got, h-1)
 		}
@@ -442,22 +419,29 @@ func TestViewNeverExceedsTerminalHeight(t *testing.T) {
 			t.Fatalf("height=%d: the calendar is not open on the Deadline field, test setup is broken", h)
 		}
 		check("form + calendar open", a4)
+
+		m4, _ := a4.Update(tea.KeyMsg{Type: tea.KeyTab}) // Worktree
+		m4, _ = m4.(AppModel).Update(tea.KeyMsg{Type: tea.KeyTab})
+		a5 := m4.(AppModel)
+		if a5.board.field != fieldParent || !strings.Contains(stripANSI(a5.View()), " match") {
+			t.Fatalf("height=%d: searchable parent dropdown is not open", h)
+		}
+		check("form + parent dropdown open", a5)
 	}
 }
 
-// The tab bar names the pages on top; the way out is a footer hint on each
-// page, next to the keys that live there — never a page-specific wording.
+// The tab bar names the pages; each page footer carries the "tab Switch" hint.
 func TestTabsNamePagesOnTopWithFooterHints(t *testing.T) {
 	a := app(t)
 	out := stripANSI(a.View())
 	lines := strings.Split(out, "\n")
-	if !strings.Contains(lines[0], "BOARD") || !strings.Contains(lines[0], "CALENDAR") {
+	if !strings.Contains(lines[0], "Board") || !strings.Contains(lines[0], "Calendar") {
 		t.Errorf("first line is not the tab bar:\n%s", out)
 	}
 	if strings.Contains(out, "tab to switch") {
 		t.Errorf("tab bar still carries the hint:\n%s", out)
 	}
-	if !strings.Contains(out, "m grab · tab switch · ? help") {
+	if !strings.Contains(out, "m Grab  f Family  ctrl+t Focus  tab Switch  ? Help  q Quit") {
 		t.Errorf("board footer is missing the tab switch hint:\n%s", out)
 	}
 	for _, stale := range []string{"tab analytics", "tab board", "tab back to the board"} {
@@ -470,7 +454,7 @@ func TestTabsNamePagesOnTopWithFooterHints(t *testing.T) {
 	m, _ = m.(AppModel).Update(tea.KeyMsg{Type: tea.KeyTab})
 	m, _ = m.(AppModel).Update(tea.KeyMsg{Type: tea.KeyTab})
 	out = stripANSI(m.(AppModel).View())
-	if !strings.Contains(out, "t today · tab switch") {
+	if !strings.Contains(out, "t Today  tab Switch  ? Help  q Quit") {
 		t.Errorf("calendar footer is missing the tab switch hint:\n%s", out)
 	}
 }

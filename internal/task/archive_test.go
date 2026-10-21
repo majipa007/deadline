@@ -86,6 +86,31 @@ func TestSweepArchiveIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSweepArchiveKeepsParentWithActiveSubtask(t *testing.T) {
+	var b Board
+	parent := b.Add("Parent", "", nil, ref.Add(-31*24*time.Hour)).ID
+	child, err := b.AddChild(parent, "Subtask", "", nil, ref.Add(-31*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Move(child.ID, StatusDone, ref.Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Move(parent, StatusDone, ref.Add(-30*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// An active child under a completed parent (bad persisted state) keeps
+	// the parent unarchived.
+	b.Tasks[1].Status = StatusDoing
+	if n := b.SweepArchive(ref); n != 0 {
+		t.Fatalf("SweepArchive = %d, want parent retained", n)
+	}
+	got, _ := b.TaskByID(parent)
+	if got.Archived {
+		t.Fatal("parent with active subtask was archived")
+	}
+}
+
 func TestSweepArchiveMarksBoardDirtyOnlyWhenItMoves(t *testing.T) {
 	var b Board
 	completedAgo(&b, "[Just done]", time.Hour)

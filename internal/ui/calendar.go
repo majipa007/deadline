@@ -12,18 +12,15 @@ import (
 	"gotodo/internal/task"
 )
 
-// monthCell decides how one day is drawn: the text of its cell and the style
-// to render that text in. Every cell must be exactly four columns wide, or
-// the grid stops lining up with its header — see monthView.
+// monthCell returns one day's text and style. The text must be exactly four
+// columns wide or the grid misaligns with its header.
 type monthCell func(day time.Time) (string, lipgloss.Style)
 
 // monthGap is the blank gutter between two month grids joined side by side.
 const monthGap = 3
 
-// monthView renders one month as a Monday-first grid: a centred title, the
-// weekday header, and one line per non-empty week. The cell function owns
-// everything about a day's appearance, which is what lets the date picker,
-// the streak calendar and the deadline calendar share this layout.
+// monthView renders one month as a Monday-first grid. cell owns each day's
+// look, so the date picker and both calendars share this layout.
 func monthView(month time.Time, cell monthCell) string {
 	title := month.Format("January 2006")
 	pad := (pickerWidth - len(title)) / 2
@@ -55,9 +52,7 @@ func monthView(month time.Time, cell monthCell) string {
 	return strings.Join(rows, "\n")
 }
 
-// monthStrip renders n consecutive months side by side, the first being
-// `first`. Shorter months are padded to the tallest, so the strip is one
-// rectangular block.
+// monthStrip renders n consecutive months from first, side by side.
 func monthStrip(first time.Time, n int, cell monthCell) string {
 	grids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -74,9 +69,8 @@ func monthStart(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, t.Location())
 }
 
-// monthsAcross is how many month grids fit in width, at least one and never
-// more than max. A width we have not been told yet assumes 80 columns, the
-// narrowest terminal the board itself supports.
+// monthsAcross is how many month grids fit in width, clamped to [1, max].
+// An unknown width assumes 80 columns.
 func monthsAcross(width, max int) int {
 	if width <= 0 {
 		width = 80
@@ -91,10 +85,8 @@ func monthsAcross(width, max int) int {
 	return n
 }
 
-// completionCell shades a day by how many tasks were finished on it: blank
-// for none, then the heat runes climbing to a full block, scaled against the
-// busiest day on screen. Today is underlined rather than recoloured, so the
-// green stays free to mean "you finished something".
+// completionCell shades a day by tasks finished on it, scaled to the busiest
+// day. Today is underlined, not recoloured, so green only means "finished".
 func completionCell(byDay map[time.Time]int, max int, today time.Time) monthCell {
 	return func(day time.Time) (string, lipgloss.Style) {
 		n := byDay[task.StartOfDay(day)]
@@ -110,10 +102,8 @@ func completionCell(byDay map[time.Time]int, max int, today time.Time) monthCell
 	}
 }
 
-// deadlineCell marks every day something is due with a bullet, in the same
-// urgency colour the card carries: green further out, amber within three
-// days, red today, tomorrow or already missed. A day with several deadlines
-// takes the colour of its most pressing one.
+// deadlineCell bullets each due day in its card's urgency colour; a day with
+// several deadlines takes the most pressing one.
 func deadlineCell(byDay map[time.Time][]task.Task, today time.Time, done task.Status) monthCell {
 	return func(day time.Time) (string, lipgloss.Style) {
 		due := byDay[task.StartOfDay(day)]
@@ -129,8 +119,8 @@ func deadlineCell(byDay map[time.Time][]task.Task, today time.Time, done task.St
 	}
 }
 
-// worstUrgency is the most pressing urgency among tasks. The Urgency
-// constants are declared in ascending pressure, so the largest wins.
+// worstUrgency is the most pressing urgency among tasks. Urgency constants
+// ascend in pressure, so the largest wins.
 func worstUrgency(tasks []task.Task, now time.Time, done task.Status) task.Urgency {
 	worst := task.UrgencyNone
 	for _, t := range tasks {
@@ -141,20 +131,15 @@ func worstUrgency(tasks []task.Task, now time.Time, done task.Status) task.Urgen
 	return worst
 }
 
-// calendarMonths is the most months the deadline page shows at once; six
-// fill a wide terminal the way three fit a 90-column one, which is what
-// monthsAcross falls back from.
+// calendarMonths is the most months the deadline page shows at once.
 const calendarMonths = 6
 
-// upcomingMin is how many rows of the upcoming list survive on a short
-// terminal. One: even squeezed to nothing the list still says how much it
-// could not show. Below about 15 rows the month strip alone is taller than
-// the terminal, and nothing here can fix that — the strip is the page.
+// upcomingMin is the fewest upcoming-list rows kept on a short terminal, so
+// the list can still say how much it hid.
 const upcomingMin = 1
 
-// CalendarModel is the fourth page: every deadline on the board laid out on
-// real months, with the list of what is due next underneath. It is view-only
-// — nothing here changes a task.
+// CalendarModel is the view-only deadline page: deadlines on a month strip
+// with the upcoming list underneath.
 type CalendarModel struct {
 	board *task.Board
 	now   func() time.Time
@@ -172,8 +157,7 @@ func NewCalendarModel(b *task.Board) CalendarModel {
 // SetSize records the terminal size for layout.
 func (m *CalendarModel) SetSize(w, h int) { m.width, m.height = w, h }
 
-// Update pages through the months. h/l step one month, t comes back to
-// today's.
+// Update pages months: h/l step one, t returns to today.
 func (m CalendarModel) Update(msg tea.Msg) (CalendarModel, tea.Cmd) {
 	k, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -190,9 +174,7 @@ func (m CalendarModel) Update(msg tea.Msg) (CalendarModel, tea.Cmd) {
 	return m, nil
 }
 
-// dated is every task on the board that has a deadline and is not finished:
-// a task in the terminal column is history, and this page is about what is
-// coming.
+// dated is every unfinished task with a deadline, soonest first.
 func (m CalendarModel) dated() []task.Task {
 	done := m.board.DoneStatus()
 	var out []task.Task
@@ -215,29 +197,28 @@ func (m CalendarModel) View() string {
 	strip := monthStrip(first, n, deadlineCell(byDay, now, m.board.DoneStatus()))
 
 	sections := []string{
-		TitleStyle.Render("DEADLINES"),
+		TitleStyle.Render("Deadlines"),
 		strip,
-		MutedStyle.Render("● due · green >3 days · amber ≤3 · red ≤1 or overdue · underline is today"),
+		MutedStyle.Render("● due   green more than 3 days   amber 3 or fewer   red 1 or fewer, or late   underline today"),
 		m.renderUpcoming(tasks, now, strip),
 	}
 	if m.offset != 0 {
 		sections[0] += MutedStyle.Render(fmt.Sprintf("  %+d months from today", m.offset))
 	}
-	sections = append(sections, HelpStyle.Render("h/l month · t today · tab switch"))
-	return strings.Join(sections, "\n")
+	return pageFrame(m.width, m.height, strings.Join(sections, "\n"),
+		append([]string{keyHint("h/l", "Month"), keyHint("t", "Today")}, globalHints()...)...)
 }
 
-// renderUpcoming lists what is due next, soonest first, filling whatever rows
-// the month strip left behind. Overdue tasks sort in ahead of everything, so
-// the thing you have already missed is the first line you read.
+// renderUpcoming lists tasks soonest first (overdue on top) in the rows the
+// month strip left free.
 func (m CalendarModel) renderUpcoming(tasks []task.Task, now time.Time, strip string) string {
-	lines := []string{TitleStyle.Render("UPCOMING")}
+	lines := []string{TitleStyle.Render("Upcoming")}
 	if len(tasks) == 0 {
 		return strings.Join(append(lines, MutedStyle.Render("nothing has a deadline")), "\n")
 	}
 
-	// Rows already spent: the tab bar, the DEADLINES heading, the strip, the
-	// legend, this heading, and the two-row help footer.
+	// Rows spent: tab bar, DEADLINES heading, strip, legend, this heading,
+	// and pageFrame's two-row footer.
 	room := m.height - lipgloss.Height(strip) - 6
 	if m.height <= 0 || room > len(tasks) {
 		room = len(tasks)
@@ -267,8 +248,7 @@ func (m CalendarModel) renderUpcoming(tasks []task.Task, now time.Time, strip st
 	return strings.Join(lines, "\n")
 }
 
-// dueIn is the human gap to a deadline: "today", "tomorrow", "in 6 days",
-// "4 days late".
+// dueIn is "today", "tomorrow", "in 6 days" or "4 days late".
 func dueIn(t task.Task, now time.Time) string {
 	days, ok := task.DaysUntilDeadline(t, now)
 	if !ok {
